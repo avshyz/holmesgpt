@@ -104,7 +104,9 @@ def _register_custom_pricing(litellm_name: str, pricing: Dict[str, float]) -> No
             f"input={entry['input_cost_per_token']}, output={entry['output_cost_per_token']}"
         )
     except Exception as e:
-        logging.warning(f"Failed to register custom pricing for '{litellm_name}': {e}")
+        logging.warning(
+            f"Failed to register custom pricing for '{litellm_name}': {e}"
+        )
 
 
 def _pricing_dict_from_bundled(bundled: Dict[str, Any]) -> Optional[Dict[str, float]]:
@@ -445,10 +447,7 @@ class DefaultLLM(LLM):
             if (
                 os.environ.get("AWS_PROFILE")
                 or os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
-                or (
-                    os.environ.get("AWS_ROLE_ARN")
-                    and os.environ.get("AWS_WEB_IDENTITY_TOKEN_FILE")
-                )
+                or (os.environ.get("AWS_ROLE_ARN") and os.environ.get("AWS_WEB_IDENTITY_TOKEN_FILE"))
             ):
                 model_requirements = {"keys_in_environment": True, "missing_keys": []}
             elif args.get("aws_access_key_id") and args.get("aws_secret_access_key"):
@@ -460,10 +459,7 @@ class DefaultLLM(LLM):
                     session = boto3.Session()
                     credentials = session.get_credentials()
                     if credentials is not None:
-                        model_requirements = {
-                            "keys_in_environment": True,
-                            "missing_keys": [],
-                        }
+                        model_requirements = {"keys_in_environment": True, "missing_keys": []}
                     else:
                         model_requirements = litellm.validate_environment(
                             model=model, api_key=api_key, api_base=api_base
@@ -488,10 +484,7 @@ class DefaultLLM(LLM):
                 if key in os.environ and key in model_requirements["missing_keys"]:
                     model_requirements["missing_keys"].remove(key)  # type: ignore
             # When using Azure AD token auth, AZURE_API_KEY is not required
-            if (
-                AZURE_AD_TOKEN_AUTH
-                and "AZURE_API_KEY" in model_requirements["missing_keys"]
-            ):
+            if AZURE_AD_TOKEN_AUTH and "AZURE_API_KEY" in model_requirements["missing_keys"]:
                 model_requirements["missing_keys"].remove("AZURE_API_KEY")  # type: ignore
 
             if not model_requirements["missing_keys"]:
@@ -612,9 +605,7 @@ class DefaultLLM(LLM):
         # wrong 85-per-image estimate. We add back the correct image tokens
         # (already computed in the per-message loop) after.
         if is_anthropic:
-            bulk_messages = [
-                _strip_images(m) if _has_images(m) else m for m in messages
-            ]
+            bulk_messages = [_strip_images(m) if _has_images(m) else m for m in messages]
         else:
             bulk_messages = messages
 
@@ -799,6 +790,7 @@ class DefaultLLM(LLM):
             result = litellm.stream_chunk_builder(
                 chunks=list(result), messages=sanitized_messages
             )
+
 
         if isinstance(result, ModelResponse):
             return result
