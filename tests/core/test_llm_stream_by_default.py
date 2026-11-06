@@ -7,7 +7,7 @@ from unittest.mock import patch
 import litellm
 from litellm.types.utils import ModelResponse
 
-from tests.core.test_llm_completion_max_tokens import _make_llm
+from tests.core.conftest import make_llm
 
 
 def _chunks():
@@ -24,7 +24,7 @@ def _chunks():
 
 
 def test_relay_args_switch_streaming_on():
-    llm = _make_llm({"custom_args": {"stream": True, "max_context_size": 7}})
+    llm = make_llm({"custom_args": {"stream": True, "max_context_size": 7}})
     llm.update_custom_args()
     assert llm.stream_by_default is True
     assert llm.max_context_size == 7
@@ -32,7 +32,7 @@ def test_relay_args_switch_streaming_on():
 
 
 def test_streams_and_rebuilds_a_priced_response():
-    llm = _make_llm({})
+    llm = make_llm()
     llm.stream_by_default = True
     litellm.register_model(
         {
@@ -54,11 +54,8 @@ def test_streams_and_rebuilds_a_priced_response():
     assert result._hidden_params["response_cost"] == 5 * 1e-6 + 2 * 2e-6
 
 
-def test_other_models_do_not_stream():
-    llm = _make_llm({})
-    with patch(
-        "holmes.core.llm.litellm.completion", return_value=ModelResponse()
-    ) as mock:
-        llm.completion(messages=[{"role": "user", "content": "hi"}])
-    assert mock.call_args.kwargs["stream"] is None
-    assert mock.call_args.kwargs["stream_options"] is None
+def test_other_models_do_not_stream(mock_completion):
+    llm = make_llm()
+    llm.completion(messages=[{"role": "user", "content": "hi"}])
+    assert mock_completion.call_args.kwargs["stream"] is None
+    assert mock_completion.call_args.kwargs["stream_options"] is None
