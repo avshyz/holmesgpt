@@ -1,46 +1,6 @@
-from unittest.mock import patch
-
 import pytest
-from litellm.types.utils import Choices, Message, ModelResponse, Usage
 
-from holmes.core.llm import DefaultLLM
-
-
-def _mock_model_response() -> ModelResponse:
-    return ModelResponse(
-        id="chatcmpl-test",
-        choices=[
-            Choices(
-                index=0,
-                message=Message(role="assistant", content="ok", tool_calls=None),
-                finish_reason="stop",
-            )
-        ],
-        model="test-model",
-        usage=Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
-    )
-
-
-def _make_llm(model: str) -> DefaultLLM:
-    """Build a DefaultLLM bypassing __init__/check_llm so we can control self.model."""
-    llm = DefaultLLM.__new__(DefaultLLM)
-    llm.model = model
-    llm.api_key = None
-    llm.api_base = None
-    llm.api_version = None
-    llm.args = {}
-    llm.tracer = None
-    llm.name = None
-    llm.is_robusta_model = False
-    llm.max_context_size = None
-    return llm
-
-
-@pytest.fixture
-def mock_completion():
-    with patch("holmes.core.llm.litellm.completion") as mock:
-        mock.return_value = _mock_model_response()
-        yield mock
+from tests.core.conftest import make_llm
 
 
 class TestCacheControlInjectionPoints:
@@ -62,7 +22,7 @@ class TestCacheControlInjectionPoints:
         ],
     )
     def test_gemini_models_skip_cache_control(self, mock_completion, model):
-        llm = _make_llm(model)
+        llm = make_llm(model=model)
         llm.completion(messages=[{"role": "user", "content": "hi"}])
         kwargs = mock_completion.call_args.kwargs
         assert "cache_control_injection_points" not in kwargs, (
@@ -82,7 +42,7 @@ class TestCacheControlInjectionPoints:
         ],
     )
     def test_non_gemini_models_keep_cache_control(self, mock_completion, model):
-        llm = _make_llm(model)
+        llm = make_llm(model=model)
         llm.completion(messages=[{"role": "user", "content": "hi"}])
         kwargs = mock_completion.call_args.kwargs
         assert kwargs.get("cache_control_injection_points") == [
@@ -91,7 +51,7 @@ class TestCacheControlInjectionPoints:
 
     def test_gemini_completion_still_forwards_messages_and_model(self, mock_completion):
         """Skipping the cache hint must not drop anything else from the call."""
-        llm = _make_llm("gemini/gemini-3.1-pro-preview")
+        llm = make_llm(model="gemini/gemini-3.1-pro-preview")
         messages = [{"role": "user", "content": "hello"}]
         llm.completion(messages=messages, temperature=0.3)
         kwargs = mock_completion.call_args.kwargs

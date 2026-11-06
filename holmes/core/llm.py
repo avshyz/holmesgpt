@@ -365,6 +365,9 @@ class DefaultLLM(LLM):
     api_version: Optional[str]
     args: Dict
     is_robusta_model: bool
+    # Relay's model args ask for this: a proxy in front of relay would idle out
+    # a long generation. completion() still returns one rebuilt response.
+    stream_by_default: bool = False
 
     def __init__(
         self,
@@ -391,8 +394,9 @@ class DefaultLLM(LLM):
         )
 
     def update_custom_args(self):
-        self.max_context_size = self.args.get("custom_args", {}).get("max_context_size")
-        self.args.pop("custom_args", None)
+        custom_args = self.args.pop("custom_args", None) or {}
+        self.max_context_size = custom_args.get("max_context_size")
+        self.stream_by_default = bool(custom_args.get("stream"))
 
     def check_llm(
         self,
@@ -760,6 +764,7 @@ class DefaultLLM(LLM):
                 }
             ]
 
+        rebuild = self.stream_by_default and not stream
         result = litellm_to_use.completion(
             model=litellm_model_name,
             api_key=self.api_key,
@@ -769,13 +774,26 @@ class DefaultLLM(LLM):
             response_format=response_format,
             drop_params=drop_params,
             allowed_openai_params=allowed_openai_params,
-            stream=stream,
+            stream=True if rebuild else stream,
+            stream_options={"include_usage": True} if rebuild else None,
             timeout=LLM_REQUEST_TIMEOUT,
             **azure_ad_kwargs,
             **tools_args,
             **self.args,
             **cache_kwargs,
         )
+        if rebuild:
+            result = litellm.stream_chunk_builder(
+                chunks=list(result), messages=sanitized_messages
+            )
+            if isinstance(result, ModelResponse):
+                # litellm prices only the responses it returns whole.
+                try:
+                    result._hidden_params["response_cost"] = litellm.completion_cost(
+                        completion_response=result, model=litellm_model_name
+                    )
+                except Exception:
+                    logging.debug("No price for %s", litellm_model_name, exc_info=True)
 
         if isinstance(result, ModelResponse):
             return result
