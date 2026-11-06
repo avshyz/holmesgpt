@@ -365,6 +365,8 @@ class DefaultLLM(LLM):
     api_version: Optional[str]
     args: Dict
     is_robusta_model: bool
+    # Relay's model args ask for this: a proxy in front of relay would idle out
+    # a long generation. completion() still returns one rebuilt response.
     stream_by_default: bool = False
 
     def __init__(
@@ -394,9 +396,6 @@ class DefaultLLM(LLM):
     def update_custom_args(self):
         custom_args = self.args.pop("custom_args", None) or {}
         self.max_context_size = custom_args.get("max_context_size")
-        # Relay sets this for its models so a proxy between Holmes and relay
-        # never idles out a long generation (ROB-1752). Callers still get a
-        # whole response: the chunks are rebuilt in completion().
         self.stream_by_default = bool(custom_args.get("stream"))
 
     def check_llm(

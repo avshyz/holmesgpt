@@ -7,7 +7,7 @@ from unittest.mock import patch
 import litellm
 from litellm.types.utils import ModelResponse
 
-from tests.core.test_llm_completion_max_tokens import _make_llm, _mock_model_response
+from tests.core.test_llm_completion_max_tokens import _make_llm
 
 
 def _chunks():
@@ -57,7 +57,7 @@ def test_streams_and_rebuilds_a_priced_response():
 def test_other_models_do_not_stream():
     llm = _make_llm({})
     with patch(
-        "holmes.core.llm.litellm.completion", return_value=_mock_model_response()
+        "holmes.core.llm.litellm.completion", return_value=ModelResponse()
     ) as mock:
         llm.completion(messages=[{"role": "user", "content": "hi"}])
     assert mock.call_args.kwargs["stream"] is None
