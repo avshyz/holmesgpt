@@ -8,6 +8,7 @@ import ssl
 import threading
 from datetime import datetime, timedelta
 from enum import Enum
+from functools import cached_property
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 from urllib.request import getproxies, proxy_bypass
@@ -1257,7 +1258,8 @@ class SupabaseDal:
 
     # ---- M2: Conversations worker DAL methods ----
 
-    def _conversation_service(self) -> Optional["ConversationServiceTransport"]:
+    @cached_property
+    def _service_transport(self) -> Optional["ConversationServiceTransport"]:
         """The service transport on CONVERSATION_TRANSPORT=service, else None.
 
         Built on first use: conversations_worker imports this module at load
@@ -1265,15 +1267,11 @@ class SupabaseDal:
         """
         if CONVERSATION_TRANSPORT is not ConversationTransport.SERVICE:
             return None
-        transport = self.__dict__.get("_service_transport")
-        if transport is None:
-            from holmes.core.conversations_worker.service_transport import (
-                ConversationServiceTransport,
-            )
+        from holmes.core.conversations_worker.service_transport import (
+            ConversationServiceTransport,
+        )
 
-            transport = ConversationServiceTransport(self)
-            self._service_transport = transport
-        return transport
+        return ConversationServiceTransport(self)
 
     def is_realtime_enabled(self) -> Optional[bool]:
         """
@@ -1364,7 +1362,7 @@ class SupabaseDal:
         if limit <= 0:
             return []
 
-        service = self._conversation_service()
+        service = self._service_transport
         if service is not None:
             # The service holds the call open until rows exist or its wait
             # ends. A failure propagates after the transport's retries: the
@@ -1531,16 +1529,6 @@ class SupabaseDal:
         if not self.enabled:
             return None
 
-        service = self._conversation_service()
-        if service is not None:
-            return service.post_conversation_events(
-                conversation_id=conversation_id,
-                assignee=assignee,
-                request_sequence=request_sequence,
-                events=events,
-                compact=compact,
-            )
-
         # Retry transient infrastructure errors so a hiccup doesn't drop a
         # batch of events. MISMATCH means the row was reassigned — never
         # retried, raised as ConversationReassignedError so the worker exits.
@@ -1581,13 +1569,22 @@ class SupabaseDal:
                     raise ConversationReassignedError(str(e)) from e
                 raise
 
+        service = self._service_transport
         try:
+            if service is not None:
+                return service.post_conversation_events(
+                    conversation_id=conversation_id,
+                    assignee=assignee,
+                    request_sequence=request_sequence,
+                    events=events,
+                    compact=compact,
+                )
             return _post_with_retry()
         except ConversationReassignedError:
             raise
         except Exception:
             logging.exception(
-                "Supabase error while posting conversation events (after retries)",
+                "Error while posting conversation events (after retries)",
                 exc_info=True,
             )
             raise
@@ -1623,25 +1620,6 @@ class SupabaseDal:
             )
             return False
 
-        service = self._conversation_service()
-        if service is not None:
-            try:
-                return service.update_conversation_status(
-                    conversation_id=conversation_id,
-                    request_sequence=request_sequence,
-                    assignee=assignee,
-                    status=status,
-                )
-            except ConversationReassignedError:
-                raise
-            except Exception:
-                logging.exception(
-                    "Conversation service error while updating conversation "
-                    "status (after retries)",
-                    exc_info=True,
-                )
-                return False
-
         # Retry transient infrastructure errors so a hiccup doesn't leave the
         # conversation stuck in a non-terminal state. MISMATCH means the row
         # was reassigned — never retried, raised as ConversationReassignedError.
@@ -1669,13 +1647,21 @@ class SupabaseDal:
                     raise ConversationReassignedError(str(e)) from e
                 raise
 
+        service = self._service_transport
         try:
+            if service is not None:
+                return service.update_conversation_status(
+                    conversation_id=conversation_id,
+                    request_sequence=request_sequence,
+                    assignee=assignee,
+                    status=status,
+                )
             return _update_with_retry()
         except ConversationReassignedError:
             raise
         except Exception:
             logging.exception(
-                "Supabase error while updating conversation status (after retries)",
+                "Error while updating conversation status (after retries)",
                 exc_info=True,
             )
             return False
@@ -1704,22 +1690,6 @@ class SupabaseDal:
         if not self.enabled:
             return []
 
-        service = self._conversation_service()
-        if service is not None:
-            try:
-                return service.get_conversation_events(
-                    conversation_id,
-                    include_compacted=include_compacted,
-                    min_seq=min_seq,
-                )
-            except Exception:
-                logging.exception(
-                    "Conversation service error while fetching conversation "
-                    "events (after retries)",
-                    exc_info=True,
-                )
-                return []
-
         # Retry transient infrastructure errors. The caller treats [] as "no
         # user question" and fails the conversation, so a hiccup here would
         # cause a spurious permanent failure.
@@ -1741,11 +1711,18 @@ class SupabaseDal:
             ).execute()
             return res.data or []
 
+        service = self._service_transport
         try:
+            if service is not None:
+                return service.get_conversation_events(
+                    conversation_id,
+                    include_compacted=include_compacted,
+                    min_seq=min_seq,
+                )
             return _fetch_with_retry()
         except Exception:
             logging.exception(
-                "Supabase error while fetching conversation events (after retries)",
+                "Error while fetching conversation events (after retries)",
                 exc_info=True,
             )
             return []

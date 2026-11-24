@@ -2,15 +2,14 @@
 verify loop, a long-poll claim loop that backs off on errors, and a
 HolmesStatus row that names the transport."""
 import json
+import runpy
 import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from holmes.common.env_vars import (
-    ConversationTransport,
-    _load_conversation_transport,
-)
+from holmes.common import env_vars
+from holmes.common.env_vars import ConversationTransport
 from holmes.core.conversations_worker.worker import (
     SERVICE_CLAIM_BACKOFF_MAX_SECONDS,
     SERVICE_CLAIM_BACKOFF_MIN_SECONDS,
@@ -20,16 +19,6 @@ from holmes.core.conversations_worker.worker import (
 )
 from holmes.core.conversations_worker.models import ConversationTask
 from holmes.utils.holmes_status import update_holmes_status_in_db
-
-ROW = {
-    "conversation_id": "c1",
-    "account_id": "a1",
-    "cluster_id": "cl1",
-    "origin": "chat",
-    "request_sequence": 1,
-    "metadata": {},
-}
-
 
 @pytest.fixture
 def on_service(monkeypatch):
@@ -49,28 +38,6 @@ def _dal():
     dal.account_id = "acct"
     dal.cluster = "cl"
     return dal
-
-
-def _bare_worker():
-    w = ConversationWorker.__new__(ConversationWorker)
-    w.dal = _dal()
-    w.config = MagicMock()
-    w.chat_function = MagicMock()
-    w.holmes_id = "h-test"
-    w._running = True
-    w._claim_thread = None
-    w._notify_event = threading.Event()
-    w._saturated_since = None
-    w._saturation_logged = False
-    w._last_stuck_warn = None
-    w._executor = MagicMock()
-    w._active_conversation_ids = {}
-    w._active_lock = threading.Lock()
-    w._dispatch_lock = threading.Lock()
-    w._realtime_manager = None
-    w._realtime_verify_thread = None
-    w._realtime_verify_stop = threading.Event()
-    return w
 
 
 def _record_waits(w):
@@ -134,10 +101,12 @@ def test_active_workers_on_service_create_no_realtime_worker(on_service):
 # ---- the long-poll claim loop ----
 
 
-def test_service_claim_loop_dispatches_rows_and_claims_again_at_once(on_service):
-    w = _bare_worker()
+def test_service_claim_loop_dispatches_rows_and_claims_again_at_once(
+    on_service, bare_worker, conversation_row
+):
+    w = bare_worker()
     waits = _record_waits(w)
-    answers = iter([[ROW], []])
+    answers = iter([[conversation_row], []])
 
     def claim(_holmes_id, limit):
         rows = next(answers)
@@ -158,8 +127,10 @@ def test_service_claim_loop_dispatches_rows_and_claims_again_at_once(on_service)
     assert waits == []
 
 
-def test_service_claim_loop_backs_off_on_errors_and_resets_on_success(on_service):
-    w = _bare_worker()
+def test_service_claim_loop_backs_off_on_errors_and_resets_on_success(
+    on_service, bare_worker
+):
+    w = bare_worker()
     waits = _record_waits(w)
     answers = iter([
         ConnectionError("down"),
@@ -188,8 +159,8 @@ def test_service_claim_loop_backs_off_on_errors_and_resets_on_success(on_service
     w._executor.submit.assert_not_called()
 
 
-def test_service_claim_loop_backoff_is_capped(on_service):
-    w = _bare_worker()
+def test_service_claim_loop_backoff_is_capped(on_service, bare_worker):
+    w = bare_worker()
     waits = _record_waits(w)
     failures = {"n": 0}
 
@@ -208,12 +179,14 @@ def test_service_claim_loop_backoff_is_capped(on_service):
     assert waits[-1] == SERVICE_CLAIM_BACKOFF_MAX_SECONDS
 
 
-def test_service_claim_loop_waits_for_a_slot_at_capacity(on_service, monkeypatch):
+def test_service_claim_loop_waits_for_a_slot_at_capacity(
+    on_service, monkeypatch, bare_worker
+):
     monkeypatch.setattr(
         "holmes.core.conversations_worker.worker.CONVERSATION_WORKER_MAX_CONCURRENT",
         1,
     )
-    w = _bare_worker()
+    w = bare_worker()
     task = ConversationTask(
         conversation_id="busy", account_id="a", cluster_id="c", origin="chat",
         request_sequence=1,
@@ -240,12 +213,14 @@ def test_service_claim_loop_waits_for_a_slot_at_capacity(on_service, monkeypatch
     w.dal.claim_n_pending_conversations.assert_called_once_with("h-test", 1)
 
 
-def test_service_claim_loop_exits_on_stop_while_saturated(on_service, monkeypatch):
+def test_service_claim_loop_exits_on_stop_while_saturated(
+    on_service, monkeypatch, bare_worker
+):
     monkeypatch.setattr(
         "holmes.core.conversations_worker.worker.CONVERSATION_WORKER_MAX_CONCURRENT",
         1,
     )
-    w = _bare_worker()
+    w = bare_worker()
     task = ConversationTask(
         conversation_id="busy", account_id="a", cluster_id="c", origin="chat",
         request_sequence=1,
@@ -306,12 +281,17 @@ def test_holmes_status_on_supabase_is_unchanged(monkeypatch):
 
 
 def test_conversation_transport_env_parsing(monkeypatch):
+    # The value is read once at import, so the module runs afresh, in its
+    # own namespace, under each environment.
+    def load():
+        return runpy.run_path(env_vars.__file__)["CONVERSATION_TRANSPORT"]
+
     monkeypatch.delenv("CONVERSATION_TRANSPORT", raising=False)
-    assert _load_conversation_transport() is ConversationTransport.SUPABASE
+    assert load() == ConversationTransport.SUPABASE
 
     monkeypatch.setenv("CONVERSATION_TRANSPORT", " Service ")
-    assert _load_conversation_transport() is ConversationTransport.SERVICE
+    assert load() == ConversationTransport.SERVICE
 
     monkeypatch.setenv("CONVERSATION_TRANSPORT", "realtime")
-    with pytest.raises(ValueError, match="CONVERSATION_TRANSPORT"):
-        _load_conversation_transport()
+    with pytest.raises(ValueError, match="ConversationTransport"):
+        load()

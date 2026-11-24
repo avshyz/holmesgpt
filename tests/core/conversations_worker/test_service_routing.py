@@ -3,39 +3,34 @@ CONVERSATION_TRANSPORT=service and leave everything else on Supabase."""
 from unittest.mock import MagicMock
 
 import pytest
+import requests
 
 from holmes.common.env_vars import ConversationTransport
 from holmes.core.conversations_worker.models import ConversationReassignedError
 from holmes.core.conversations_worker.service_transport import (
-    ConversationServiceError,
     ConversationServiceTransport,
 )
-from holmes.core.supabase_dal import SupabaseDal
 
 
-def _dal(monkeypatch, transport: ConversationTransport):
-    monkeypatch.setattr("holmes.core.supabase_dal.CONVERSATION_TRANSPORT", transport)
-    dal = SupabaseDal.__new__(SupabaseDal)
-    dal.enabled = True
-    dal.account_id = "acc-1"
-    dal.cluster = "cluster-1"
-    dal.client = MagicMock()
-    dal.client.rpc.return_value = MagicMock(
-        execute=MagicMock(return_value=MagicMock(data=[]))
+@pytest.fixture
+def service_dal(monkeypatch, build_dal):
+    monkeypatch.setattr(
+        "holmes.core.supabase_dal.CONVERSATION_TRANSPORT",
+        ConversationTransport.SERVICE,
     )
+    dal = build_dal(rpc_data=[])
     service = MagicMock(spec=ConversationServiceTransport)
     dal._service_transport = service
     return dal, service
 
 
 @pytest.fixture
-def service_dal(monkeypatch):
-    return _dal(monkeypatch, ConversationTransport.SERVICE)
-
-
-@pytest.fixture
-def supabase_dal(monkeypatch):
-    return _dal(monkeypatch, ConversationTransport.SUPABASE)
+def supabase_dal(monkeypatch, build_dal):
+    monkeypatch.setattr(
+        "holmes.core.supabase_dal.CONVERSATION_TRANSPORT",
+        ConversationTransport.SUPABASE,
+    )
+    return build_dal(rpc_data=[])
 
 
 def test_claim_routes_to_the_service(service_dal):
@@ -60,9 +55,9 @@ def test_claim_on_the_service_propagates_failures(service_dal):
     """The service claim loop backs off on an exception, so unlike the
     Supabase path the DAL does not swallow one into an empty answer."""
     dal, service = service_dal
-    service.claim.side_effect = ConversationServiceError("503", status_code=503)
+    service.claim.side_effect = requests.HTTPError("503 Service Unavailable")
 
-    with pytest.raises(ConversationServiceError):
+    with pytest.raises(requests.HTTPError):
         dal.claim_n_pending_conversations("h-1", 1)
 
 
@@ -81,7 +76,7 @@ def test_get_conversation_events_routes_to_the_service(service_dal):
 
 def test_get_conversation_events_on_the_service_returns_empty_on_failure(service_dal):
     dal, service = service_dal
-    service.get_conversation_events.side_effect = ConversationServiceError("500")
+    service.get_conversation_events.side_effect = requests.HTTPError("500")
 
     assert dal.get_conversation_events("c1") == []
 
@@ -138,7 +133,7 @@ def test_update_conversation_status_on_the_service_returns_false_on_failure(
     service_dal,
 ):
     dal, service = service_dal
-    service.update_conversation_status.side_effect = ConversationServiceError("500")
+    service.update_conversation_status.side_effect = requests.HTTPError("500")
 
     assert dal.update_conversation_status("c1", 2, "h-1", "failed") is False
 
@@ -177,19 +172,19 @@ def test_the_rest_of_the_dal_stays_on_supabase(service_dal):
     assert not service.method_calls
 
 
-def test_service_transport_is_built_once_on_first_use(monkeypatch):
-    dal, _ = _dal(monkeypatch, ConversationTransport.SERVICE)
+def test_service_transport_is_built_once_on_first_use(service_dal):
+    dal, _ = service_dal
     del dal._service_transport
 
-    first = dal._conversation_service()
-    second = dal._conversation_service()
+    first = dal._service_transport
+    second = dal._service_transport
 
     assert isinstance(first, ConversationServiceTransport)
     assert first is second
 
 
 def test_supabase_transport_leaves_the_rpcs_in_place(supabase_dal):
-    dal, service = supabase_dal
+    dal = supabase_dal
     dal.client.rpc.return_value = MagicMock(
         execute=MagicMock(return_value=MagicMock(data=[{"conversation_id": "c1"}]))
     )
@@ -198,5 +193,4 @@ def test_supabase_transport_leaves_the_rpcs_in_place(supabase_dal):
     assert dal.get_conversation_events("c1") == [{"conversation_id": "c1"}]
 
     assert dal.client.rpc.call_count == 2
-    assert dal._conversation_service() is None
-    assert not service.method_calls
+    assert dal._service_transport is None

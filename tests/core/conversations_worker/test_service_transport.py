@@ -16,21 +16,11 @@ from holmes.core.conversations_worker.service_transport import (
     CLAIM_READ_TIMEOUT_MARGIN_SECONDS,
     CLAIM_WAIT_SECONDS,
     CONNECT_TIMEOUT_SECONDS,
-    ConversationServiceError,
     ConversationServiceTransport,
 )
 
 BASE = "https://api.example.test/api/conversations/v1"
 AGENT = f"{BASE}/agent"
-
-ROW = {
-    "conversation_id": "c1",
-    "account_id": "acc-1",
-    "cluster_id": "cluster-1",
-    "origin": "chat",
-    "request_sequence": 1,
-    "metadata": {},
-}
 
 
 @pytest.fixture(autouse=True)
@@ -53,13 +43,13 @@ def _transport():
 # ---- claim ----
 
 
-def test_claim_sends_holmes_bearer_and_body(responses):
-    responses.post(f"{AGENT}/claim", json={"conversations": [ROW]})
+def test_claim_sends_holmes_bearer_and_body(responses, conversation_row):
+    responses.post(f"{AGENT}/claim", json={"conversations": [conversation_row]})
     transport, _ = _transport()
 
-    rows = transport.claim("cluster-1", "h-1", 3, wait_seconds=25)
+    rows = transport.claim("cluster-1", "h-1", 3)
 
-    assert rows == [ROW]
+    assert rows == [conversation_row]
     request = responses.calls[0].request
     assert request.headers["Authorization"] == "Bearer acc-1 tok-1"
     assert request.body is not None
@@ -77,7 +67,7 @@ def test_claim_read_timeout_outlives_the_long_poll():
         return_value=MagicMock(status_code=200, json=lambda: {"conversations": []})
     )
 
-    transport.claim("cluster-1", "h-1", 1, wait_seconds=CLAIM_WAIT_SECONDS)
+    transport.claim("cluster-1", "h-1", 1)
 
     timeout = transport._session.request.call_args.kwargs["timeout"]
     assert timeout == (
@@ -85,15 +75,6 @@ def test_claim_read_timeout_outlives_the_long_poll():
         CLAIM_WAIT_SECONDS + CLAIM_READ_TIMEOUT_MARGIN_SECONDS,
     )
     assert timeout[1] > CLAIM_WAIT_SECONDS
-
-
-def test_claim_default_wait_is_the_contract_maximum(responses):
-    responses.post(f"{AGENT}/claim", json={"conversations": []})
-    transport, _ = _transport()
-
-    assert transport.claim("cluster-1", "h-1", 2) == []
-
-    assert json.loads(responses.calls[0].request.body)["wait_seconds"] == 25
 
 
 # ---- events ----
@@ -147,22 +128,22 @@ def test_post_conversation_events_409_reassigned_raises(responses):
     assert len(responses.calls) == 1
 
 
-def test_409_without_reassigned_is_a_service_error(responses):
+def test_409_without_reassigned_is_an_http_error(responses):
     responses.post(f"{AGENT}/conversations/c1/status", status=409, json={"error": "busy"})
     transport, _ = _transport()
 
-    with pytest.raises(ConversationServiceError) as info:
+    with pytest.raises(requests.HTTPError) as info:
         transport.update_conversation_status("c1", 1, "h-1", "completed")
 
-    assert info.value.status_code == 409
+    assert info.value.response.status_code == 409
     assert len(responses.calls) == 1
 
 
-def test_post_conversation_events_without_seq_is_a_service_error(responses):
+def test_post_conversation_events_without_seq_is_a_value_error(responses):
     responses.post(f"{AGENT}/conversations/c1/events", json={})
     transport, _ = _transport()
 
-    with pytest.raises(ConversationServiceError, match="no seq"):
+    with pytest.raises(ValueError, match="no seq"):
         transport.post_conversation_events("c1", "h-1", 1, [])
 
 
@@ -186,13 +167,13 @@ def test_update_conversation_status_returns_ok(responses):
 # ---- retries ----
 
 
-def test_transient_5xx_is_retried_then_succeeds(responses):
+def test_transient_5xx_is_retried_then_succeeds(responses, conversation_row):
     responses.post(f"{AGENT}/claim", status=503, body="upstream down")
     responses.post(f"{AGENT}/claim", status=502, body="bad gateway")
-    responses.post(f"{AGENT}/claim", json={"conversations": [ROW]})
+    responses.post(f"{AGENT}/claim", json={"conversations": [conversation_row]})
     transport, _ = _transport()
 
-    assert transport.claim("cluster-1", "h-1", 1) == [ROW]
+    assert transport.claim("cluster-1", "h-1", 1) == [conversation_row]
     assert len(responses.calls) == 3
 
 
@@ -201,10 +182,10 @@ def test_5xx_raises_after_the_dal_attempt_budget(responses):
         responses.post(f"{AGENT}/claim", status=500, body="boom")
     transport, _ = _transport()
 
-    with pytest.raises(ConversationServiceError) as info:
+    with pytest.raises(requests.HTTPError) as info:
         transport.claim("cluster-1", "h-1", 1)
 
-    assert info.value.status_code == 500
+    assert info.value.response.status_code == 500
     assert len(responses.calls) == 3
 
 
@@ -224,10 +205,10 @@ def test_4xx_is_not_retried(responses):
     responses.get(f"{AGENT}/conversations/c1/events", status=400, json={"error": "bad"})
     transport, _ = _transport()
 
-    with pytest.raises(ConversationServiceError) as info:
+    with pytest.raises(requests.HTTPError) as info:
         transport.get_conversation_events("c1")
 
-    assert info.value.status_code == 400
+    assert info.value.response.status_code == 400
     assert len(responses.calls) == 1
 
 
@@ -235,33 +216,9 @@ def test_401_drops_the_cached_token_without_retrying(responses):
     responses.post(f"{AGENT}/claim", status=401, json={"error": "unauthorized"})
     transport, dal = _transport()
 
-    with pytest.raises(ConversationServiceError) as info:
+    with pytest.raises(requests.HTTPError) as info:
         transport.claim("cluster-1", "h-1", 1)
 
-    assert info.value.status_code == 401
+    assert info.value.response.status_code == 401
     assert len(responses.calls) == 1
     assert "session_token" not in dal.token_cache
-
-
-# ---- TLS ----
-
-
-def test_session_verify_follows_the_dal_ca_lookup(monkeypatch, tmp_path):
-    bundle = tmp_path / "ca.pem"
-    bundle.write_text("")
-    monkeypatch.setenv("SSL_CERT_FILE", str(bundle))
-    monkeypatch.setenv("REQUESTS_CA_BUNDLE", "/elsewhere.pem")
-
-    transport, _ = _transport()
-
-    assert transport._session.verify == str(bundle)
-    assert transport.agent_url == AGENT
-
-
-def test_session_verify_defaults_to_the_trust_store(monkeypatch):
-    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
-    monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
-
-    transport, _ = _transport()
-
-    assert transport._session.verify is True

@@ -308,18 +308,9 @@ class ConversationTransport(str, Enum):
     SERVICE = "service"
 
 
-def _load_conversation_transport() -> ConversationTransport:
-    raw = os.environ.get("CONVERSATION_TRANSPORT", ConversationTransport.SUPABASE.value)
-    try:
-        return ConversationTransport(raw.strip().lower())
-    except ValueError:
-        choices = ", ".join(t.value for t in ConversationTransport)
-        raise ValueError(
-            f"CONVERSATION_TRANSPORT must be one of: {choices}; got {raw!r}"
-        ) from None
-
-
-CONVERSATION_TRANSPORT = _load_conversation_transport()
+CONVERSATION_TRANSPORT = ConversationTransport(
+    os.environ.get("CONVERSATION_TRANSPORT", "supabase").strip().lower()
+)
 # Base of the platform-conversations API; the agent endpoints hang off /agent.
 CONVERSATIONS_SERVICE_URL = os.environ.get(
     "CONVERSATIONS_SERVICE_URL", f"{ROBUSTA_API_ENDPOINT}/api/conversations/v1"

@@ -107,16 +107,16 @@ def update_holmes_status_in_db(
             "or verify that a cluster name is provided in the Robusta configuration file."
         )
 
-    if CONVERSATION_TRANSPORT is ConversationTransport.SERVICE:
-        # The service replaces Realtime, so there is nothing to verify first.
-        # supports_realtime_conversations keeps the FE on the Conversations
-        # flow; conversation_transport then sends it to the service, where no
-        # wake broadcast exists.
+    # The service replaces Realtime, so there is nothing to verify first:
+    # supports_realtime_conversations keeps the FE on the Conversations flow,
+    # and conversation_transport sends it to the service, where no wake
+    # broadcast exists.
+    on_service = CONVERSATION_TRANSPORT is ConversationTransport.SERVICE
+    if realtime_available or on_service:
         supports_realtime = bool(ENABLE_CONVERSATION_WORKER)
-        requires_broadcast = False
-    elif realtime_available:
-        supports_realtime = bool(ENABLE_CONVERSATION_WORKER)
-        requires_broadcast = bool(CONVERSATION_WORKER_USE_REALTIME_BROADCAST)
+        requires_broadcast = not on_service and bool(
+            CONVERSATION_WORKER_USE_REALTIME_BROADCAST
+        )
     else:
         supports_realtime = False
         requires_broadcast = False

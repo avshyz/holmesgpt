@@ -41,7 +41,7 @@ class RobustaModelsResponse(BaseModel):
     models: Dict[str, RobustaModel]
 
 
-def _is_retryable_fetch_error(exc: BaseException) -> bool:
+def is_retryable_relay_error(exc: BaseException) -> bool:
     if isinstance(exc, requests.exceptions.HTTPError):
         return (
             exc.response is not None
@@ -73,7 +73,7 @@ def _log_fetch_retry(retry_state: RetryCallState) -> None:
 # they block boot — the liveness probe kills the pod after ~130s without a
 # served /healthz.
 @retry(
-    retry=retry_if_exception(_is_retryable_fetch_error),
+    retry=retry_if_exception(is_retryable_relay_error),
     stop=stop_after_attempt(FETCH_MODELS_ATTEMPTS),
     wait=wait_exponential(multiplier=2, min=2, max=10),
     before_sleep=_log_fetch_retry,

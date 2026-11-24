@@ -1,15 +1,14 @@
 """HTTP client for the platform-conversations agent endpoints.
 
 The contract is relay/docs/design/2026-11-24_chat-service-poc.md, sections 6
-and 7. Holmes only ever connects outbound, so this client carries the same CA
-bundle and proxy settings as the Supabase client and authenticates with the
-HOLMES session token the DAL already mints for Robusta AI.
+and 7. Holmes only ever connects outbound: the session relies on
+REQUESTS_CA_BUNDLE and the proxy environment, as the other relay calls in
+Holmes do, and authenticates with the HOLMES session token the DAL already
+mints for Robusta AI.
 """
 
 import logging
-import os
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
-from urllib.parse import quote
 
 import requests
 from tenacity import (
@@ -20,6 +19,7 @@ from tenacity import (
     wait_exponential,
 )
 
+from holmes.clients.robusta_client import is_retryable_relay_error
 from holmes.common.env_vars import CONVERSATIONS_SERVICE_URL
 from holmes.core.conversations_worker.models import ConversationReassignedError
 
@@ -31,30 +31,12 @@ if TYPE_CHECKING:
 CLAIM_WAIT_SECONDS = 25
 CONNECT_TIMEOUT_SECONDS = 10
 READ_TIMEOUT_SECONDS = 30
-# The claim's read timeout is wait_seconds plus this, so the service ends the
-# long-poll and the client never gives up on a healthy call.
+# The claim's read timeout is CLAIM_WAIT_SECONDS plus this, so the service ends
+# the long-poll and the client never gives up on a healthy call.
 CLAIM_READ_TIMEOUT_MARGIN_SECONDS = 15
 
 # Same budget as the DAL's conversation RPCs.
 _RETRY_ATTEMPTS = 3
-_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
-
-
-class ConversationServiceError(Exception):
-    """An answer the service will keep giving: a 4xx other than a 409
-    reassignment, a malformed body, or a 5xx that outlived the retries."""
-
-    def __init__(self, message: str, status_code: Optional[int] = None):
-        super().__init__(message)
-        self.status_code = status_code
-
-
-def _is_transient(exc: BaseException) -> bool:
-    if isinstance(exc, ConversationServiceError):
-        return exc.status_code in _RETRYABLE_STATUS_CODES
-    return isinstance(
-        exc, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)
-    )
 
 
 def _log_retry(retry_state: RetryCallState) -> None:
@@ -67,19 +49,6 @@ def _log_retry(retry_state: RetryCallState) -> None:
     )
 
 
-def _ca_bundle() -> "str | bool":
-    """The DAL's lookup: SSL_CERT_FILE first, then REQUESTS_CA_BUNDLE.
-
-    requests reads REQUESTS_CA_BUNDLE on its own but not SSL_CERT_FILE, so a
-    cluster that sets only the latter would otherwise verify against certifi.
-    Proxies need no mirroring: requests resolves HTTPS_PROXY and NO_PROXY per
-    request, the way the DAL does by hand for httpx.
-    """
-    return (
-        os.environ.get("SSL_CERT_FILE") or os.environ.get("REQUESTS_CA_BUNDLE") or True
-    )
-
-
 def _error_text(response: requests.Response) -> str:
     body = response.text or ""
     return f"{response.status_code} {response.reason}: {body[:500]}"
@@ -88,28 +57,17 @@ def _error_text(response: requests.Response) -> str:
 class ConversationServiceTransport:
     """The four agent calls of the contract, each raising
     ``ConversationReassignedError`` on ``409 {error: "reassigned"}`` and
-    ``ConversationServiceError`` on any other failure that survived the retries.
+    ``requests.HTTPError`` on any other 4xx/5xx that survived the retries.
     """
 
     def __init__(self, dal: "SupabaseDal", base_url: str = CONVERSATIONS_SERVICE_URL):
         self._dal = dal
         self._agent_url = base_url.rstrip("/") + "/agent"
         self._session = requests.Session()
-        self._session.verify = _ca_bundle()
-
-    @property
-    def agent_url(self) -> str:
-        return self._agent_url
 
     # ---- the contract ----
 
-    def claim(
-        self,
-        cluster_id: str,
-        assignee: str,
-        limit: int,
-        wait_seconds: int = CLAIM_WAIT_SECONDS,
-    ) -> List[Dict[str, Any]]:
+    def claim(self, cluster_id: str, assignee: str, limit: int) -> List[Dict[str, Any]]:
         body = self._request_with_retry(
             "POST",
             "/claim",
@@ -117,9 +75,9 @@ class ConversationServiceTransport:
                 "cluster_id": cluster_id,
                 "assignee": assignee,
                 "limit": limit,
-                "wait_seconds": wait_seconds,
+                "wait_seconds": CLAIM_WAIT_SECONDS,
             },
-            read_timeout=wait_seconds + CLAIM_READ_TIMEOUT_MARGIN_SECONDS,
+            read_timeout=CLAIM_WAIT_SECONDS + CLAIM_READ_TIMEOUT_MARGIN_SECONDS,
         )
         return list(body.get("conversations") or [])
 
@@ -131,7 +89,7 @@ class ConversationServiceTransport:
     ) -> List[Dict[str, Any]]:
         body = self._request_with_retry(
             "GET",
-            f"/conversations/{quote(conversation_id, safe='')}/events",
+            f"/conversations/{conversation_id}/events",
             params={
                 "include_compacted": "true" if include_compacted else "false",
                 "min_seq": min_seq,
@@ -149,7 +107,7 @@ class ConversationServiceTransport:
     ) -> int:
         body = self._request_with_retry(
             "POST",
-            f"/conversations/{quote(conversation_id, safe='')}/events",
+            f"/conversations/{conversation_id}/events",
             json={
                 "assignee": assignee,
                 "request_sequence": request_sequence,
@@ -159,9 +117,7 @@ class ConversationServiceTransport:
         )
         seq = body.get("seq")
         if seq is None:
-            raise ConversationServiceError(
-                f"post events answer carries no seq: {body!r}"
-            )
+            raise ValueError(f"post events answer carries no seq: {body!r}")
         return int(seq)
 
     def update_conversation_status(
@@ -173,7 +129,7 @@ class ConversationServiceTransport:
     ) -> bool:
         body = self._request_with_retry(
             "POST",
-            f"/conversations/{quote(conversation_id, safe='')}/status",
+            f"/conversations/{conversation_id}/status",
             json={
                 "assignee": assignee,
                 "request_sequence": request_sequence,
@@ -185,7 +141,7 @@ class ConversationServiceTransport:
     # ---- transport ----
 
     @retry(
-        retry=retry_if_exception(_is_transient),
+        retry=retry_if_exception(is_retryable_relay_error),
         stop=stop_after_attempt(_RETRY_ATTEMPTS),
         wait=wait_exponential(multiplier=0.5, min=0.5, max=2.0),
         before_sleep=_log_retry,
@@ -220,9 +176,7 @@ class ConversationServiceTransport:
             # contract keeps 4xx final); the next call mints a fresh token.
             self._forget_credentials()
         if response.status_code >= 400:
-            raise ConversationServiceError(
-                _error_text(response), status_code=response.status_code
-            )
+            raise requests.HTTPError(_error_text(response), response=response)
         return _json_body(response)
 
     def _forget_credentials(self) -> None:
