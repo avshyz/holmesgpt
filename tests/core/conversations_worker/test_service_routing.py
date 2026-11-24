@@ -24,15 +24,6 @@ def service_dal(monkeypatch, build_dal):
     return dal, service
 
 
-@pytest.fixture
-def supabase_dal(monkeypatch, build_dal):
-    monkeypatch.setattr(
-        "holmes.core.supabase_dal.CONVERSATION_TRANSPORT",
-        ConversationTransport.SUPABASE,
-    )
-    return build_dal(rpc_data=[])
-
-
 def test_claim_routes_to_the_service(service_dal):
     dal, service = service_dal
     service.claim.return_value = [{"conversation_id": "c1"}]
@@ -158,20 +149,6 @@ def test_disabled_dal_never_touches_the_service(service_dal):
     assert not service.method_calls
 
 
-def test_the_rest_of_the_dal_stays_on_supabase(service_dal):
-    dal, service = service_dal
-    dal.client.rpc.return_value = MagicMock(
-        execute=MagicMock(return_value=MagicMock(data=True))
-    )
-
-    assert dal.is_realtime_enabled() is True
-    dal.client.rpc.assert_called_once_with("is_realtime_enabled", {})
-
-    dal.upsert_holmes_status({"cluster_id": "cluster-1"})
-    dal.client.table.assert_called_once_with("HolmesStatus")
-    assert not service.method_calls
-
-
 def test_service_transport_is_built_once_on_first_use(service_dal):
     dal, _ = service_dal
     del dal._service_transport
@@ -183,14 +160,9 @@ def test_service_transport_is_built_once_on_first_use(service_dal):
     assert first is second
 
 
-def test_supabase_transport_leaves_the_rpcs_in_place(supabase_dal):
-    dal = supabase_dal
-    dal.client.rpc.return_value = MagicMock(
-        execute=MagicMock(return_value=MagicMock(data=[{"conversation_id": "c1"}]))
+def test_supabase_transport_has_no_service(monkeypatch, build_dal):
+    monkeypatch.setattr(
+        "holmes.core.supabase_dal.CONVERSATION_TRANSPORT",
+        ConversationTransport.SUPABASE,
     )
-
-    assert dal.claim_n_pending_conversations("h-1", 2) == [{"conversation_id": "c1"}]
-    assert dal.get_conversation_events("c1") == [{"conversation_id": "c1"}]
-
-    assert dal.client.rpc.call_count == 2
-    assert dal._service_transport is None
+    assert build_dal()._service_transport is None

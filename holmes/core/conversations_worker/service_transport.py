@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 import requests
 from tenacity import (
-    RetryCallState,
+    before_sleep_log,
     retry,
     retry_if_exception,
     stop_after_attempt,
@@ -37,16 +37,6 @@ CLAIM_READ_TIMEOUT_MARGIN_SECONDS = 15
 
 # Same budget as the DAL's conversation RPCs.
 _RETRY_ATTEMPTS = 3
-
-
-def _log_retry(retry_state: RetryCallState) -> None:
-    exc = retry_state.outcome.exception() if retry_state.outcome else None
-    logging.warning(
-        "Conversation service request failed (attempt %d/%d): %s; retrying",
-        retry_state.attempt_number,
-        _RETRY_ATTEMPTS,
-        exc,
-    )
 
 
 def _error_text(response: requests.Response) -> str:
@@ -144,7 +134,7 @@ class ConversationServiceTransport:
         retry=retry_if_exception(is_retryable_relay_error),
         stop=stop_after_attempt(_RETRY_ATTEMPTS),
         wait=wait_exponential(multiplier=0.5, min=0.5, max=2.0),
-        before_sleep=_log_retry,
+        before_sleep=before_sleep_log(logging.getLogger(__name__), logging.WARNING),
         reraise=True,
     )
     def _request_with_retry(
