@@ -47,22 +47,6 @@ def _record_waits(w):
 # ---- start / active workers ----
 
 
-def test_start_on_service_starts_active_workers_without_a_verifier(
-    on_service, worker_dal
-):
-    w = ConversationWorker(
-        dal=worker_dal, config=MagicMock(), chat_function=MagicMock()
-    )
-    w._start_active_workers = MagicMock()
-
-    w.start()
-
-    w._start_active_workers.assert_called_once_with()
-    assert w._running is True
-    assert w._realtime_verify_thread is None
-    worker_dal.is_realtime_enabled.assert_not_called()
-
-
 def test_active_workers_on_service_create_no_realtime_worker(on_service, worker_dal):
     # Hold the claim open like the service does, so the loop is idle while
     # the test inspects the worker.
@@ -80,10 +64,12 @@ def test_active_workers_on_service_create_no_realtime_worker(on_service, worker_
     with patch("holmes.core.conversations_worker.worker.RealtimeWorker") as rt:
         try:
             w.start()
+            assert w._running is True
             assert w._executor is not None
             assert w._claim_thread is not None and w._claim_thread.is_alive()
             assert w._claim_thread._target == w._service_claim_loop  # type: ignore[attr-defined]
             assert w._realtime_manager is None
+            assert w._realtime_verify_thread is None
             rt.assert_not_called()
         finally:
             release.set()

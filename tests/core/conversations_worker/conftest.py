@@ -1,7 +1,7 @@
 """Fixtures shared by the conversation worker unit tests."""
 import threading
 import time
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Optional
 from unittest.mock import MagicMock
 
 import pytest
@@ -91,9 +91,13 @@ def bare_worker() -> Callable[[], ConversationWorker]:
 
 
 def _active(
-    w: ConversationWorker, conversation_id: str = "c1", request_sequence: int = 1
+    w: ConversationWorker,
+    conversation_id: str = "c1",
+    request_sequence: int = 1,
+    started: Optional[float] = None,
 ) -> ConversationTask:
-    """Register an in-flight conversation the way _dispatch does."""
+    """Register an in-flight conversation the way _dispatch does. ``started``
+    backdates the slot for the stuck-slot tests."""
     task = ConversationTask(
         conversation_id=conversation_id,
         account_id="a1",
@@ -101,5 +105,7 @@ def _active(
         origin="chat",
         request_sequence=request_sequence,
     )
-    w._active_conversation_ids[task.active_key] = _ActiveTask(task, time.monotonic())
+    w._active_conversation_ids[task.active_key] = _ActiveTask(
+        task, time.monotonic() if started is None else started
+    )
     return task

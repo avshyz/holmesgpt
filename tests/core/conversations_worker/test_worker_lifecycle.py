@@ -14,21 +14,8 @@ from holmes.core.conversations_worker.worker import (
     SHUTDOWN_ERROR_CODE,
     SHUTDOWN_REASON,
     ConversationWorker,
-    _ActiveTask,
 )
 from tests.core.conversations_worker.conftest import _active
-
-
-def _slot(started: float, conversation_id="c-slot", request_sequence=1):
-    """An occupied executor slot, as _dispatch records it."""
-    task = ConversationTask(
-        conversation_id=conversation_id,
-        account_id="a1",
-        cluster_id="cl1",
-        origin="chat",
-        request_sequence=request_sequence,
-    )
-    return _ActiveTask(task, started)
 
 
 def test_build_task_from_conversation_row_parses_required_fields(bare_worker):
@@ -124,7 +111,8 @@ def test_try_claim_and_dispatch_passes_remaining_capacity_as_limit(monkeypatch, 
     )
     # Two conversations already running -> only 3 free slots remain
     # (free = MAX_CONCURRENT - active; there is no longer a local queue).
-    w._active_conversation_ids = {"existing1": _slot(0.0), "existing2": _slot(0.0)}
+    _active(w, "existing1")
+    _active(w, "existing2")
     w.dal.claim_n_pending_conversations.return_value = []
     w._try_claim_and_dispatch()
     w.dal.claim_n_pending_conversations.assert_called_once_with("h-test", 3)
@@ -139,7 +127,7 @@ def test_try_claim_and_dispatch_skips_claim_when_at_capacity(monkeypatch, bare_w
         1,
     )
     # Already have one active conversation -> zero free slots.
-    w._active_conversation_ids = {"existing": _slot(0.0)}
+    _active(w, "existing")
     w._try_claim_and_dispatch()
     # No claim RPC is issued at all when there is no free capacity.
     w.dal.claim_n_pending_conversations.assert_not_called()
@@ -156,7 +144,7 @@ def test_saturation_logs_only_after_continuous_window(monkeypatch, caplog, bare_
         "holmes.core.conversations_worker.worker.CONVERSATION_WORKER_MAX_CONCURRENT",
         1,
     )
-    w._active_conversation_ids = {("conv-busy", 1): _slot(time.monotonic())}
+    _active(w, "conv-busy", 1)
 
     def saturation_lines():
         return [
@@ -209,7 +197,7 @@ def test_brief_free_slot_resets_saturation_clock(monkeypatch, caplog, bare_worke
 
     with caplog.at_level(logging.INFO):
         # Saturated, clock nearly expired.
-        w._active_conversation_ids = {("conv-a", 1): _slot(time.monotonic())}
+        _active(w, "conv-a", 1)
         w._try_claim_and_dispatch()
         w._saturated_since = time.monotonic() - 59.0
 
@@ -220,7 +208,7 @@ def test_brief_free_slot_resets_saturation_clock(monkeypatch, caplog, bare_worke
 
         # Saturated again: window starts over, so no log even though the
         # combined saturated time exceeds the threshold.
-        w._active_conversation_ids = {("conv-b", 1): _slot(time.monotonic())}
+        _active(w, "conv-b", 1)
         w._try_claim_and_dispatch()
     assert not [
         r for r in caplog.records if "claim capacity" in r.getMessage()
@@ -239,7 +227,7 @@ def test_stuck_slot_emits_warning(monkeypatch, caplog, bare_worker):
         "holmes.core.conversations_worker.worker.CONVERSATION_WORKER_SLOT_STUCK_WARN_SECONDS",
         100.0,
     )
-    w._active_conversation_ids = {("conv-stuck", 1): _slot(time.monotonic() - 150.0)}
+    _active(w, "conv-stuck", 1, started=time.monotonic() - 150.0)
     w._saturated_since = time.monotonic() - 10.0  # saturation ongoing
 
     def stuck_warnings():

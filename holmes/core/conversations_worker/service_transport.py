@@ -39,11 +39,6 @@ CLAIM_READ_TIMEOUT_MARGIN_SECONDS = 15
 _RETRY_ATTEMPTS = 3
 
 
-def _error_text(response: requests.Response) -> str:
-    body = response.text or ""
-    return f"{response.status_code} {response.reason}: {body[:500]}"
-
-
 class ConversationServiceTransport:
     """The four agent calls of the contract, each raising
     ``ConversationReassignedError`` on ``409 {error: "reassigned"}`` and
@@ -166,7 +161,10 @@ class ConversationServiceTransport:
             # contract keeps 4xx final); the next call mints a fresh token.
             self._forget_credentials()
         if response.status_code >= 400:
-            raise requests.HTTPError(_error_text(response), response=response)
+            raise requests.HTTPError(
+                f"{response.status_code} {response.reason}: {(response.text or '')[:500]}",
+                response=response,
+            )
         return _json_body(response)
 
     def _forget_credentials(self) -> None:

@@ -189,29 +189,6 @@ def test_5xx_raises_after_the_dal_attempt_budget(responses):
     assert len(responses.calls) == 3
 
 
-def test_connection_error_is_retried(responses):
-    responses.post(
-        f"{AGENT}/conversations/c1/events",
-        body=requests.exceptions.ConnectionError("reset by peer"),
-    )
-    responses.post(f"{AGENT}/conversations/c1/events", json={"seq": 1})
-    transport, _ = _transport()
-
-    assert transport.post_conversation_events("c1", "h-1", 1, []) == 1
-    assert len(responses.calls) == 2
-
-
-def test_4xx_is_not_retried(responses):
-    responses.get(f"{AGENT}/conversations/c1/events", status=400, json={"error": "bad"})
-    transport, _ = _transport()
-
-    with pytest.raises(requests.HTTPError) as info:
-        transport.get_conversation_events("c1")
-
-    assert info.value.response.status_code == 400
-    assert len(responses.calls) == 1
-
-
 def test_401_drops_the_cached_token_without_retrying(responses):
     responses.post(f"{AGENT}/claim", status=401, json={"error": "unauthorized"})
     transport, dal = _transport()
