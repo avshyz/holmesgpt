@@ -35,12 +35,14 @@ from tenacity import (
 )
 
 from holmes.common.env_vars import (
+    CONVERSATION_TRANSPORT,
     ROBUSTA_ACCOUNT_ID,
     ROBUSTA_CONFIG_PATH,
     STORE_API_KEY,
     STORE_EMAIL,
     STORE_PASSWORD,
     STORE_URL,
+    ConversationTransport,
 )
 from holmes.core.resource_instruction import (
     ResourceInstructionDocument,
@@ -63,6 +65,9 @@ if TYPE_CHECKING:
     # this module, so importing the other direction at runtime would close
     # the cycle. We just need the name for the parameter annotation.
     from holmes.core.usage_recorder import UsageRecorderState
+    from holmes.core.conversations_worker.service_transport import (
+        ConversationServiceTransport,
+    )
 
 SUPABASE_TIMEOUT_SECONDS = int(os.getenv("SUPABASE_TIMEOUT_SECONDS", 60))
 
@@ -1252,6 +1257,24 @@ class SupabaseDal:
 
     # ---- M2: Conversations worker DAL methods ----
 
+    def _conversation_service(self) -> Optional["ConversationServiceTransport"]:
+        """The service transport on CONVERSATION_TRANSPORT=service, else None.
+
+        Built on first use: conversations_worker imports this module at load
+        time, so the transport cannot be imported at the top.
+        """
+        if CONVERSATION_TRANSPORT is not ConversationTransport.SERVICE:
+            return None
+        transport = self.__dict__.get("_service_transport")
+        if transport is None:
+            from holmes.core.conversations_worker.service_transport import (
+                ConversationServiceTransport,
+            )
+
+            transport = ConversationServiceTransport(self)
+            self._service_transport = transport
+        return transport
+
     def is_realtime_enabled(self) -> Optional[bool]:
         """
         Check whether Supabase Realtime is enabled by calling the
@@ -1340,6 +1363,14 @@ class SupabaseDal:
             return []
         if limit <= 0:
             return []
+
+        service = self._conversation_service()
+        if service is not None:
+            # The service holds the call open until rows exist or its wait
+            # ends. A failure propagates after the transport's retries: the
+            # service claim loop backs off on it, which it cannot do on an
+            # empty answer.
+            return service.claim(self.cluster, holmes_id, limit)
 
         # Retry transient infra errors (DNS/5xx) so a hiccup doesn't skip a poll.
         @retry(
@@ -1500,6 +1531,16 @@ class SupabaseDal:
         if not self.enabled:
             return None
 
+        service = self._conversation_service()
+        if service is not None:
+            return service.post_conversation_events(
+                conversation_id=conversation_id,
+                assignee=assignee,
+                request_sequence=request_sequence,
+                events=events,
+                compact=compact,
+            )
+
         # Retry transient infrastructure errors so a hiccup doesn't drop a
         # batch of events. MISMATCH means the row was reassigned — never
         # retried, raised as ConversationReassignedError so the worker exits.
@@ -1582,6 +1623,25 @@ class SupabaseDal:
             )
             return False
 
+        service = self._conversation_service()
+        if service is not None:
+            try:
+                return service.update_conversation_status(
+                    conversation_id=conversation_id,
+                    request_sequence=request_sequence,
+                    assignee=assignee,
+                    status=status,
+                )
+            except ConversationReassignedError:
+                raise
+            except Exception:
+                logging.exception(
+                    "Conversation service error while updating conversation "
+                    "status (after retries)",
+                    exc_info=True,
+                )
+                return False
+
         # Retry transient infrastructure errors so a hiccup doesn't leave the
         # conversation stuck in a non-terminal state. MISMATCH means the row
         # was reassigned — never retried, raised as ConversationReassignedError.
@@ -1643,6 +1703,22 @@ class SupabaseDal:
         """
         if not self.enabled:
             return []
+
+        service = self._conversation_service()
+        if service is not None:
+            try:
+                return service.get_conversation_events(
+                    conversation_id,
+                    include_compacted=include_compacted,
+                    min_seq=min_seq,
+                )
+            except Exception:
+                logging.exception(
+                    "Conversation service error while fetching conversation "
+                    "events (after retries)",
+                    exc_info=True,
+                )
+                return []
 
         # Retry transient infrastructure errors. The caller treats [] as "no
         # user question" and fails the conversation, so a hiccup here would

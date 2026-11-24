@@ -2,6 +2,7 @@ import json
 import os
 import platform
 import tempfile
+from enum import Enum
 from typing import Optional
 
 # Recommended models for different providers
@@ -292,4 +293,34 @@ CONVERSATION_WORKER_REALTIME_VERIFY_INITIAL_BACKOFF_SECONDS = float(
 )
 CONVERSATION_WORKER_REALTIME_VERIFY_MAX_BACKOFF_SECONDS = float(
     os.environ.get("CONVERSATION_WORKER_REALTIME_VERIFY_MAX_BACKOFF_SECONDS", 120.0)
+)
+
+
+class ConversationTransport(str, Enum):
+    """Where the conversation worker claims, reads and writes conversations.
+
+    SUPABASE: PostgREST RPCs plus the Realtime websocket for the wake signal.
+    SERVICE: the platform-conversations HTTP service (long-poll claim, no
+    Realtime). The FE picks the same side from HolmesStatus.metadata.
+    """
+
+    SUPABASE = "supabase"
+    SERVICE = "service"
+
+
+def _load_conversation_transport() -> ConversationTransport:
+    raw = os.environ.get("CONVERSATION_TRANSPORT", ConversationTransport.SUPABASE.value)
+    try:
+        return ConversationTransport(raw.strip().lower())
+    except ValueError:
+        choices = ", ".join(t.value for t in ConversationTransport)
+        raise ValueError(
+            f"CONVERSATION_TRANSPORT must be one of: {choices}; got {raw!r}"
+        ) from None
+
+
+CONVERSATION_TRANSPORT = _load_conversation_transport()
+# Base of the platform-conversations API; the agent endpoints hang off /agent.
+CONVERSATIONS_SERVICE_URL = os.environ.get(
+    "CONVERSATIONS_SERVICE_URL", f"{ROBUSTA_API_ENDPOINT}/api/conversations/v1"
 )

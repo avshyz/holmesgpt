@@ -7,8 +7,10 @@ unit tests directly under that folder, integration tests under
 ## Unit tests (no external services)
 
 These cover the worker's internal logic — hydration, edge cases, lifecycle,
-polling, the DAL contract, the event publisher, the realtime manager — using
-mocks. They need no running server, no Supabase, and no environment variables.
+polling, the DAL contract, the event publisher, the realtime manager, the
+service transport (`CONVERSATION_TRANSPORT=service`) and its DAL routing —
+using mocks. They need no running server, no Supabase, and no environment
+variables.
 
 ```bash
 poetry run pytest tests/core/conversations_worker/ \

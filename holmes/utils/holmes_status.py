@@ -8,8 +8,10 @@ from typing import Optional
 
 from holmes import get_version  # type: ignore
 from holmes.common.env_vars import (
+    CONVERSATION_TRANSPORT,
     ENABLE_CONVERSATION_WORKER,
     CONVERSATION_WORKER_USE_REALTIME_BROADCAST,
+    ConversationTransport,
 )
 from holmes.config import Config
 from holmes.core.supabase_dal import SupabaseDal
@@ -61,6 +63,9 @@ class HolmesMetadata:
     supports_realtime_conversations: bool = False
     requires_realtime_broadcast: bool = False
     namespace: Optional[str] = None
+    # The FE opens a chat on this cluster through the same side (contract:
+    # relay/docs/design/2026-11-24_chat-service-poc.md).
+    conversation_transport: str = ConversationTransport.SUPABASE.value
 
 
 # Last realtime_available value passed to update_holmes_status_in_db. The
@@ -88,7 +93,8 @@ def update_holmes_status_in_db(
     startup and only flip to their env-var-driven values once Supabase
     has explicitly confirmed Realtime is enabled (``realtime_available=True``).
     This avoids advertising realtime support before we've verified the
-    project actually has it turned on.
+    project actually has it turned on. On the service transport there is no
+    Realtime to verify, so the flags are final from the first write.
     """
     global _last_realtime_available
     _last_realtime_available = realtime_available
@@ -101,7 +107,14 @@ def update_holmes_status_in_db(
             "or verify that a cluster name is provided in the Robusta configuration file."
         )
 
-    if realtime_available:
+    if CONVERSATION_TRANSPORT is ConversationTransport.SERVICE:
+        # The service replaces Realtime, so there is nothing to verify first.
+        # supports_realtime_conversations keeps the FE on the Conversations
+        # flow; conversation_transport then sends it to the service, where no
+        # wake broadcast exists.
+        supports_realtime = bool(ENABLE_CONVERSATION_WORKER)
+        requires_broadcast = False
+    elif realtime_available:
         supports_realtime = bool(ENABLE_CONVERSATION_WORKER)
         requires_broadcast = bool(CONVERSATION_WORKER_USE_REALTIME_BROADCAST)
     else:
@@ -113,6 +126,7 @@ def update_holmes_status_in_db(
         supports_realtime_conversations=supports_realtime,
         requires_realtime_broadcast=requires_broadcast,
         namespace=_detect_runner_namespace(),
+        conversation_transport=CONVERSATION_TRANSPORT.value,
     )
 
     dal.upsert_holmes_status(

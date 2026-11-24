@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING, Union
 from starlette.requests import Request
 
 from holmes.common.env_vars import (
+    CONVERSATION_TRANSPORT,
     CONVERSATION_WORKER_EVENT_BATCH_INTERVAL_SECONDS,
     CONVERSATION_WORKER_MAX_CONCURRENT,
     CONVERSATION_WORKER_POLL_INTERVAL_SECONDS_WITH_REALTIME,
@@ -18,6 +19,7 @@ from holmes.common.env_vars import (
     CONVERSATION_WORKER_SLOT_STUCK_WARN_SECONDS,
     CONVERSATION_WORKER_REALTIME_VERIFY_INITIAL_BACKOFF_SECONDS,
     CONVERSATION_WORKER_REALTIME_VERIFY_MAX_BACKOFF_SECONDS,
+    ConversationTransport,
 )
 from holmes.core.conversations import build_chat_messages
 from holmes.core.conversations_worker.event_publisher import (
@@ -100,6 +102,17 @@ SHUTDOWN_ERROR_CODE = 5205
 # thing this is here to prevent. Rows we don't reach fall back to the pg_cron
 # stale sweep, exactly as they did before.
 SHUTDOWN_RETIRE_BUDGET_SECONDS = 10.0
+
+# Service transport claim loop. A failed long-poll claim backs off between
+# these bounds; at full capacity the loop re-checks for a free slot this often
+# when no finishing conversation wakes it first.
+SERVICE_CLAIM_BACKOFF_MIN_SECONDS = 1.0
+SERVICE_CLAIM_BACKOFF_MAX_SECONDS = 30.0
+SERVICE_CLAIM_SATURATED_WAIT_SECONDS = 5.0
+
+
+def _uses_service_transport() -> bool:
+    return CONVERSATION_TRANSPORT is ConversationTransport.SERVICE
 
 
 class _ActiveTask:
@@ -213,6 +226,12 @@ class ConversationWorker:
         # doesn't support our use case.
         self._running = True
 
+        if _uses_service_transport():
+            # Nothing to verify: the service replaces Realtime, and the
+            # HolmesStatus row written at startup already advertises it.
+            self._start_active_workers()
+            return
+
         self._realtime_verify_stop.clear()
         self._realtime_verify_thread = threading.Thread(
             target=self._realtime_verify_loop,
@@ -245,7 +264,7 @@ class ConversationWorker:
             thread_name_prefix="conversation-worker",
         )
 
-        if CONVERSATION_WORKER_REALTIME_ENABLED:
+        if CONVERSATION_WORKER_REALTIME_ENABLED and not _uses_service_transport():
             try:
                 self._realtime_manager = RealtimeWorker(
                     dal=self.dal,
@@ -262,7 +281,11 @@ class ConversationWorker:
                 self._realtime_manager = None
 
         self._claim_thread = threading.Thread(
-            target=self._claim_loop,
+            target=(
+                self._service_claim_loop
+                if _uses_service_transport()
+                else self._claim_loop
+            ),
             daemon=True,
             name="conversation-claim-loop",
         )
@@ -276,10 +299,12 @@ class ConversationWorker:
             logging.exception("Failed to start ToolCallWorker", exc_info=True)
 
         logging.info(
-            "ConversationWorker active (holmes_id=%s, account=%s, cluster=%s, realtime=%s)",
+            "ConversationWorker active (holmes_id=%s, account=%s, cluster=%s, "
+            "transport=%s, realtime=%s)",
             self.holmes_id,
             self.dal.account_id,
             self.dal.cluster,
+            CONVERSATION_TRANSPORT.value,
             self._realtime_manager is not None,
         )
 
@@ -494,6 +519,36 @@ class ConversationWorker:
                     triggered,
                     exc_info=True,
                 )
+
+    def _service_claim_loop(self) -> None:
+        """Claim through the service's long-poll instead of poll-or-wake.
+
+        The service answers at once when rows exist and after its wait
+        otherwise, so the next call goes out immediately: the call is both the
+        wake and the claim. At full capacity the loop waits for a slot instead
+        of calling (a finishing conversation sets ``_notify_event``). A failed
+        claim backs off so a service outage does not become a hot loop.
+        """
+        backoff = SERVICE_CLAIM_BACKOFF_MIN_SECONDS
+        while self._running:
+            if self._free_claim_slots() <= 0:
+                self._note_saturation()
+                self._notify_event.wait(timeout=SERVICE_CLAIM_SATURATED_WAIT_SECONDS)
+                self._notify_event.clear()
+                continue
+            try:
+                self._try_claim_and_dispatch()
+            except Exception:
+                logging.warning(
+                    "Conversation claim through the service failed; retrying in %.0fs",
+                    backoff,
+                    exc_info=True,
+                )
+                self._notify_event.wait(timeout=backoff)
+                self._notify_event.clear()
+                backoff = min(backoff * 2, SERVICE_CLAIM_BACKOFF_MAX_SECONDS)
+                continue
+            backoff = SERVICE_CLAIM_BACKOFF_MIN_SECONDS
 
     def claim_pending_conversations(self) -> None:
         """Routing target for RealtimeWorker on 'pending_conversations'
