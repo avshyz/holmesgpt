@@ -16,6 +16,7 @@ from holmes.core.conversations_worker.worker import (
     ConversationWorker,
     _ActiveTask,
 )
+from tests.core.conversations_worker.conftest import _active
 
 
 def _slot(started: float, conversation_id="c-slot", request_sequence=1):
@@ -727,15 +728,11 @@ def test_realtime_verify_loop_surfaces_unexpected_exceptions(bare_worker):
     mock_update.assert_not_called()
 
 
-def test_start_only_spawns_verifier_not_active_workers():
+def test_start_only_spawns_verifier_not_active_workers(worker_dal):
     """start() must NOT spin up the executor, claim loop, or Realtime
     subscription before the verifier confirms realtime is enabled —
     otherwise we'd be polling/subscribing for projects that don't
     support our feature at all."""
-    dal = MagicMock()
-    dal.enabled = True
-    dal.account_id = "acct"
-    dal.cluster = "cl"
     # Make is_realtime_enabled block forever so the verifier doesn't
     # progress; we want to inspect the state BEFORE verification completes.
     block_event = threading.Event()
@@ -744,10 +741,10 @@ def test_start_only_spawns_verifier_not_active_workers():
         block_event.wait(timeout=5)
         return None
 
-    dal.is_realtime_enabled.side_effect = blocking_check
+    worker_dal.is_realtime_enabled.side_effect = blocking_check
     config = MagicMock()
     chat_function = MagicMock()
-    w = ConversationWorker(dal=dal, config=config, chat_function=chat_function)
+    w = ConversationWorker(dal=worker_dal, config=config, chat_function=chat_function)
 
     try:
         w.start()
@@ -763,17 +760,13 @@ def test_start_only_spawns_verifier_not_active_workers():
         w.stop()
 
 
-def test_start_starts_active_workers_after_definitive_true():
+def test_start_starts_active_workers_after_definitive_true(worker_dal):
     """End-to-end: once is_realtime_enabled returns True, the verifier
     must call _start_active_workers and update HolmesStatus."""
-    dal = MagicMock()
-    dal.enabled = True
-    dal.account_id = "acct"
-    dal.cluster = "cl"
-    dal.is_realtime_enabled.return_value = True
+    worker_dal.is_realtime_enabled.return_value = True
     config = MagicMock()
     chat_function = MagicMock()
-    w = ConversationWorker(dal=dal, config=config, chat_function=chat_function)
+    w = ConversationWorker(dal=worker_dal, config=config, chat_function=chat_function)
 
     with patch(
         "holmes.core.conversations_worker.worker.CONVERSATION_WORKER_REALTIME_ENABLED",
@@ -786,7 +779,9 @@ def test_start_starts_active_workers_after_definitive_true():
             assert w._realtime_verify_thread is not None
             w._realtime_verify_thread.join(timeout=3)
             assert not w._realtime_verify_thread.is_alive()
-            mock_update.assert_called_once_with(dal, config, realtime_available=True)
+            mock_update.assert_called_once_with(
+                worker_dal, config, realtime_available=True
+            )
             # Active workers should be up now.
             assert w._executor is not None
             assert w._claim_thread is not None
@@ -794,17 +789,13 @@ def test_start_starts_active_workers_after_definitive_true():
             w.stop()
 
 
-def test_start_does_not_start_active_workers_after_definitive_false():
+def test_start_does_not_start_active_workers_after_definitive_false(worker_dal):
     """When is_realtime_enabled returns False, the active workers must
     never spin up — start() never produced an executor or claim loop."""
-    dal = MagicMock()
-    dal.enabled = True
-    dal.account_id = "acct"
-    dal.cluster = "cl"
-    dal.is_realtime_enabled.return_value = False
+    worker_dal.is_realtime_enabled.return_value = False
     config = MagicMock()
     chat_function = MagicMock()
-    w = ConversationWorker(dal=dal, config=config, chat_function=chat_function)
+    w = ConversationWorker(dal=worker_dal, config=config, chat_function=chat_function)
 
     with patch(
         "holmes.core.conversations_worker.worker.update_holmes_status_in_db"
@@ -824,20 +815,19 @@ def test_start_does_not_start_active_workers_after_definitive_false():
     assert w._running is False  # stop() was triggered by the verifier
 
 
-def test_start_skips_when_dal_disabled():
+def test_start_skips_when_dal_disabled(worker_dal):
     """If the DAL itself isn't enabled, start() returns early without
     spawning any threads."""
-    dal = MagicMock()
-    dal.enabled = False
+    worker_dal.enabled = False
     config = MagicMock()
     chat_function = MagicMock()
-    w = ConversationWorker(dal=dal, config=config, chat_function=chat_function)
+    w = ConversationWorker(dal=worker_dal, config=config, chat_function=chat_function)
 
     w.start()
 
     assert w._running is False
     assert w._realtime_verify_thread is None
-    dal.is_realtime_enabled.assert_not_called()
+    worker_dal.is_realtime_enabled.assert_not_called()
 
 
 def test_claim_loop_initial_claim_without_realtime(bare_worker):
@@ -912,19 +902,6 @@ def test_realtime_verify_loop_surfaces_non_transient_exception(caplog, bare_work
 # ---------------------------------------------------------------------------
 # Shutdown: retire in-flight conversations ("Holmes Restarted")
 # ---------------------------------------------------------------------------
-
-
-def _active(w, conversation_id="c1", request_sequence=1):
-    """Register an in-flight conversation the way _dispatch does."""
-    task = ConversationTask(
-        conversation_id=conversation_id,
-        account_id="a1",
-        cluster_id="cl1",
-        origin="chat",
-        request_sequence=request_sequence,
-    )
-    w._active_conversation_ids[task.active_key] = _ActiveTask(task, time.monotonic())
-    return task
 
 
 def test_timeout_active_conversations_posts_reason_then_sets_timeout(bare_worker):

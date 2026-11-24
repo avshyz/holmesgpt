@@ -1,11 +1,13 @@
 """Fixtures shared by the conversation worker unit tests."""
 import threading
+import time
 from typing import Any, Callable, Dict
 from unittest.mock import MagicMock
 
 import pytest
 
-from holmes.core.conversations_worker.worker import ConversationWorker
+from holmes.core.conversations_worker.models import ConversationTask
+from holmes.core.conversations_worker.worker import ConversationWorker, _ActiveTask
 from holmes.core.supabase_dal import SupabaseDal
 
 
@@ -44,6 +46,17 @@ def build_dal() -> Callable[..., SupabaseDal]:
 
 
 @pytest.fixture
+def worker_dal() -> MagicMock:
+    """The DAL a start() test hands ConversationWorker(): enabled, with the
+    identity the worker reads at construction."""
+    dal = MagicMock()
+    dal.enabled = True
+    dal.account_id = "acct"
+    dal.cluster = "cl"
+    return dal
+
+
+@pytest.fixture
 def bare_worker() -> Callable[[], ConversationWorker]:
     """A ConversationWorker built without __init__: mocked DAL and executor,
     no threads, already running. Each call is a fresh worker, so a test can
@@ -75,3 +88,18 @@ def bare_worker() -> Callable[[], ConversationWorker]:
         return w
 
     return build
+
+
+def _active(
+    w: ConversationWorker, conversation_id: str = "c1", request_sequence: int = 1
+) -> ConversationTask:
+    """Register an in-flight conversation the way _dispatch does."""
+    task = ConversationTask(
+        conversation_id=conversation_id,
+        account_id="a1",
+        cluster_id="cl1",
+        origin="chat",
+        request_sequence=request_sequence,
+    )
+    w._active_conversation_ids[task.active_key] = _ActiveTask(task, time.monotonic())
+    return task

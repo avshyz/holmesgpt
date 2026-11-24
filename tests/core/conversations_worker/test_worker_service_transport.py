@@ -15,10 +15,9 @@ from holmes.core.conversations_worker.worker import (
     SERVICE_CLAIM_BACKOFF_MIN_SECONDS,
     SERVICE_CLAIM_SATURATED_WAIT_SECONDS,
     ConversationWorker,
-    _ActiveTask,
 )
-from holmes.core.conversations_worker.models import ConversationTask
 from holmes.utils.holmes_status import update_holmes_status_in_db
+from tests.core.conversations_worker.conftest import _active
 
 @pytest.fixture
 def on_service(monkeypatch):
@@ -30,14 +29,6 @@ def on_service(monkeypatch):
         "holmes.core.conversations_worker.worker.CONVERSATION_WORKER_MAX_CONCURRENT",
         2,
     )
-
-
-def _dal():
-    dal = MagicMock()
-    dal.enabled = True
-    dal.account_id = "acct"
-    dal.cluster = "cl"
-    return dal
 
 
 def _record_waits(w):
@@ -56,9 +47,12 @@ def _record_waits(w):
 # ---- start / active workers ----
 
 
-def test_start_on_service_starts_active_workers_without_a_verifier(on_service):
-    dal = _dal()
-    w = ConversationWorker(dal=dal, config=MagicMock(), chat_function=MagicMock())
+def test_start_on_service_starts_active_workers_without_a_verifier(
+    on_service, worker_dal
+):
+    w = ConversationWorker(
+        dal=worker_dal, config=MagicMock(), chat_function=MagicMock()
+    )
     w._start_active_workers = MagicMock()
 
     w.start()
@@ -66,11 +60,10 @@ def test_start_on_service_starts_active_workers_without_a_verifier(on_service):
     w._start_active_workers.assert_called_once_with()
     assert w._running is True
     assert w._realtime_verify_thread is None
-    dal.is_realtime_enabled.assert_not_called()
+    worker_dal.is_realtime_enabled.assert_not_called()
 
 
-def test_active_workers_on_service_create_no_realtime_worker(on_service):
-    dal = _dal()
+def test_active_workers_on_service_create_no_realtime_worker(on_service, worker_dal):
     # Hold the claim open like the service does, so the loop is idle while
     # the test inspects the worker.
     release = threading.Event()
@@ -79,8 +72,10 @@ def test_active_workers_on_service_create_no_realtime_worker(on_service):
         release.wait(timeout=5)
         return []
 
-    dal.claim_n_pending_conversations.side_effect = long_poll
-    w = ConversationWorker(dal=dal, config=MagicMock(), chat_function=MagicMock())
+    worker_dal.claim_n_pending_conversations.side_effect = long_poll
+    w = ConversationWorker(
+        dal=worker_dal, config=MagicMock(), chat_function=MagicMock()
+    )
 
     with patch("holmes.core.conversations_worker.worker.RealtimeWorker") as rt:
         try:
@@ -94,7 +89,7 @@ def test_active_workers_on_service_create_no_realtime_worker(on_service):
             release.set()
             w.stop()
 
-    dal.is_realtime_enabled.assert_not_called()
+    worker_dal.is_realtime_enabled.assert_not_called()
     assert w._running is False
 
 
@@ -187,11 +182,7 @@ def test_service_claim_loop_waits_for_a_slot_at_capacity(
         1,
     )
     w = bare_worker()
-    task = ConversationTask(
-        conversation_id="busy", account_id="a", cluster_id="c", origin="chat",
-        request_sequence=1,
-    )
-    w._active_conversation_ids = {task.active_key: _ActiveTask(task, 0.0)}
+    _active(w, "busy")
     waits = []
 
     def wait_then_free_slot(timeout=None):
@@ -221,11 +212,7 @@ def test_service_claim_loop_exits_on_stop_while_saturated(
         1,
     )
     w = bare_worker()
-    task = ConversationTask(
-        conversation_id="busy", account_id="a", cluster_id="c", origin="chat",
-        request_sequence=1,
-    )
-    w._active_conversation_ids = {task.active_key: _ActiveTask(task, 0.0)}
+    _active(w, "busy")
 
     t = threading.Thread(target=w._service_claim_loop)
     t.start()
