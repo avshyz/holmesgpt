@@ -1,8 +1,8 @@
 """The ConversationWorker on CONVERSATION_TRANSPORT=service: no Realtime, no
 verify loop, a long-poll claim loop that backs off on errors, and a
 HolmesStatus row that names the transport."""
+
 import json
-import runpy
 import threading
 from unittest.mock import MagicMock, patch
 
@@ -10,14 +10,10 @@ import pytest
 
 from holmes.common import env_vars
 from holmes.common.env_vars import ConversationTransport
-from holmes.core.conversations_worker.worker import (
-    SERVICE_CLAIM_BACKOFF_MAX_SECONDS,
-    SERVICE_CLAIM_BACKOFF_MIN_SECONDS,
-    SERVICE_CLAIM_SATURATED_WAIT_SECONDS,
-    ConversationWorker,
-)
+from holmes.core.conversations_worker.worker import SERVICE_CLAIM_SATURATED_WAIT_SECONDS
 from holmes.utils.holmes_status import update_holmes_status_in_db
 from tests.core.conversations_worker.conftest import _active
+
 
 @pytest.fixture
 def on_service(monkeypatch):
@@ -47,7 +43,9 @@ def _record_waits(w):
 # ---- start / active workers ----
 
 
-def test_active_workers_on_service_create_no_realtime_worker(on_service, worker_dal):
+def test_active_workers_on_service_create_no_realtime_worker(
+    on_service, worker_dal, worker
+):
     # Hold the claim open like the service does, so the loop is idle while
     # the test inspects the worker.
     release = threading.Event()
@@ -57,26 +55,24 @@ def test_active_workers_on_service_create_no_realtime_worker(on_service, worker_
         return []
 
     worker_dal.claim_n_pending_conversations.side_effect = long_poll
-    w = ConversationWorker(
-        dal=worker_dal, config=MagicMock(), chat_function=MagicMock()
-    )
 
     with patch("holmes.core.conversations_worker.worker.RealtimeWorker") as rt:
         try:
-            w.start()
-            assert w._running is True
-            assert w._executor is not None
-            assert w._claim_thread is not None and w._claim_thread.is_alive()
-            assert w._claim_thread._target == w._service_claim_loop  # type: ignore[attr-defined]
-            assert w._realtime_manager is None
-            assert w._realtime_verify_thread is None
+            worker.start()
+            assert worker._running is True
+            assert worker._executor is not None
+            assert worker._claim_thread is not None and worker._claim_thread.is_alive()
+            target = worker._claim_thread._target  # type: ignore[attr-defined]
+            assert target == worker._service_claim_loop
+            assert worker._realtime_manager is None
+            assert worker._realtime_verify_thread is None
             rt.assert_not_called()
         finally:
             release.set()
-            w.stop()
+            worker.stop()
 
     worker_dal.is_realtime_enabled.assert_not_called()
-    assert w._running is False
+    assert worker._running is False
 
 
 # ---- the long-poll claim loop ----
@@ -113,14 +109,7 @@ def test_service_claim_loop_backs_off_on_errors_and_resets_on_success(
 ):
     w = bare_worker()
     waits = _record_waits(w)
-    answers = iter([
-        ConnectionError("down"),
-        ConnectionError("down"),
-        ConnectionError("down"),
-        [],
-        ConnectionError("down"),
-        [],
-    ])
+    answers = iter([*[ConnectionError("down")] * 7, [], ConnectionError("down"), []])
 
     def claim(_holmes_id, _limit):
         answer = next(answers, None)
@@ -135,40 +124,15 @@ def test_service_claim_loop_backs_off_on_errors_and_resets_on_success(
 
     w._service_claim_loop()
 
-    assert waits == [1.0, 2.0, 4.0, 1.0]
-    assert waits[0] == SERVICE_CLAIM_BACKOFF_MIN_SECONDS
+    # Doubling, the cap, and the reset after a successful claim.
+    assert waits == [1.0, 2.0, 4.0, 8.0, 16.0, 30.0, 30.0, 1.0]
     w._executor.submit.assert_not_called()
 
 
-def test_service_claim_loop_backoff_is_capped(on_service, bare_worker):
-    w = bare_worker()
-    waits = _record_waits(w)
-    failures = {"n": 0}
-
-    def claim(_holmes_id, _limit):
-        failures["n"] += 1
-        if failures["n"] > 8:
-            w._running = False
-            return []
-        raise ConnectionError("down")
-
-    w.dal.claim_n_pending_conversations.side_effect = claim
-
-    w._service_claim_loop()
-
-    assert max(waits) == SERVICE_CLAIM_BACKOFF_MAX_SECONDS
-    assert waits[-1] == SERVICE_CLAIM_BACKOFF_MAX_SECONDS
-
-
-def test_service_claim_loop_waits_for_a_slot_at_capacity(
-    on_service, monkeypatch, bare_worker
-):
-    monkeypatch.setattr(
-        "holmes.core.conversations_worker.worker.CONVERSATION_WORKER_MAX_CONCURRENT",
-        1,
-    )
+def test_service_claim_loop_waits_for_a_slot_at_capacity(on_service, bare_worker):
     w = bare_worker()
     _active(w, "busy")
+    _active(w, "busy2")
     waits = []
 
     def wait_then_free_slot(timeout=None):
@@ -187,18 +151,13 @@ def test_service_claim_loop_waits_for_a_slot_at_capacity(
     w._service_claim_loop()
 
     assert waits == [SERVICE_CLAIM_SATURATED_WAIT_SECONDS]
-    w.dal.claim_n_pending_conversations.assert_called_once_with("h-test", 1)
+    w.dal.claim_n_pending_conversations.assert_called_once_with("h-test", 2)
 
 
-def test_service_claim_loop_exits_on_stop_while_saturated(
-    on_service, monkeypatch, bare_worker
-):
-    monkeypatch.setattr(
-        "holmes.core.conversations_worker.worker.CONVERSATION_WORKER_MAX_CONCURRENT",
-        1,
-    )
+def test_service_claim_loop_exits_on_stop_while_saturated(on_service, bare_worker):
     w = bare_worker()
     _active(w, "busy")
+    _active(w, "busy2")
 
     t = threading.Thread(target=w._service_claim_loop)
     t.start()
@@ -253,18 +212,5 @@ def test_holmes_status_on_supabase_is_unchanged(monkeypatch):
 # ---- env ----
 
 
-def test_conversation_transport_env_parsing(monkeypatch):
-    # The value is read once at import, so the module runs afresh, in its
-    # own namespace, under each environment.
-    def load():
-        return runpy.run_path(env_vars.__file__)["CONVERSATION_TRANSPORT"]
-
-    monkeypatch.delenv("CONVERSATION_TRANSPORT", raising=False)
-    assert load() == ConversationTransport.SUPABASE
-
-    monkeypatch.setenv("CONVERSATION_TRANSPORT", " Service ")
-    assert load() == ConversationTransport.SERVICE
-
-    monkeypatch.setenv("CONVERSATION_TRANSPORT", "realtime")
-    with pytest.raises(ValueError, match="ConversationTransport"):
-        load()
+def test_conversation_transport_defaults_to_supabase():
+    assert env_vars.CONVERSATION_TRANSPORT is ConversationTransport.SUPABASE

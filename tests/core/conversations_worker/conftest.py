@@ -1,4 +1,5 @@
 """Fixtures shared by the conversation worker unit tests."""
+
 import threading
 import time
 from typing import Any, Callable, Dict, Optional
@@ -11,17 +12,33 @@ from holmes.core.conversations_worker.worker import ConversationWorker, _ActiveT
 from holmes.core.supabase_dal import SupabaseDal
 
 
-@pytest.fixture
-def conversation_row() -> Dict[str, Any]:
+def _row(conversation_id: str, request_sequence: int = 1) -> Dict[str, Any]:
     """A claimed Conversations row, as the claim RPC and the service return it."""
     return {
-        "conversation_id": "c1",
+        "conversation_id": conversation_id,
         "account_id": "acc-1",
         "cluster_id": "cluster-1",
         "origin": "chat",
-        "request_sequence": 1,
+        "request_sequence": request_sequence,
         "metadata": {},
     }
+
+
+def _task(**kwargs: Any) -> ConversationTask:
+    defaults: Dict[str, Any] = dict(
+        conversation_id="c1",
+        account_id="a1",
+        cluster_id="cl1",
+        origin="chat",
+        request_sequence=1,
+    )
+    defaults.update(kwargs)
+    return ConversationTask(**defaults)
+
+
+@pytest.fixture
+def conversation_row() -> Dict[str, Any]:
+    return _row("c1")
 
 
 @pytest.fixture
@@ -47,13 +64,17 @@ def build_dal() -> Callable[..., SupabaseDal]:
 
 @pytest.fixture
 def worker_dal() -> MagicMock:
-    """The DAL a start() test hands ConversationWorker(): enabled, with the
-    identity the worker reads at construction."""
+    """The DAL a start() test hands ConversationWorker(): enabled."""
     dal = MagicMock()
     dal.enabled = True
-    dal.account_id = "acct"
-    dal.cluster = "cl"
     return dal
+
+
+@pytest.fixture
+def worker(worker_dal: MagicMock) -> ConversationWorker:
+    return ConversationWorker(
+        dal=worker_dal, config=MagicMock(), chat_function=MagicMock()
+    )
 
 
 @pytest.fixture
@@ -66,8 +87,6 @@ def bare_worker() -> Callable[[], ConversationWorker]:
         w = ConversationWorker.__new__(ConversationWorker)
         w.dal = MagicMock()
         w.dal.enabled = True
-        w.dal.account_id = "acc-1"
-        w.dal.cluster = "cluster-1"
         w.dal.update_conversation_status = MagicMock(return_value=True)
         w.config = MagicMock()
         w.chat_function = MagicMock()
@@ -98,13 +117,7 @@ def _active(
 ) -> ConversationTask:
     """Register an in-flight conversation the way _dispatch does. ``started``
     backdates the slot for the stuck-slot tests."""
-    task = ConversationTask(
-        conversation_id=conversation_id,
-        account_id="a1",
-        cluster_id="cl1",
-        origin="chat",
-        request_sequence=request_sequence,
-    )
+    task = _task(conversation_id=conversation_id, request_sequence=request_sequence)
     w._active_conversation_ids[task.active_key] = _ActiveTask(
         task, time.monotonic() if started is None else started
     )

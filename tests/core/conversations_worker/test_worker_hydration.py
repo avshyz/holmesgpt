@@ -6,26 +6,14 @@ There is no row/seq nesting at this level — the RPC flattens all events from
 all matching ConversationEvents rows into a single list ordered by
 ``(seq, ord)``. Turn boundaries are detected by the ``user_message`` event.
 """
-from holmes.core.conversations_worker.models import ConversationTask
 from holmes.core.conversations_worker.worker import ConversationWorker
+from tests.core.conversations_worker.conftest import _task
 
 
 def _make_worker():
     """Build a ConversationWorker without calling its __init__ so we can test
     _hydrate_task_from_events in isolation."""
     return ConversationWorker.__new__(ConversationWorker)
-
-
-def _task(**kwargs):
-    defaults = dict(
-        conversation_id="c1",
-        account_id="a1",
-        cluster_id="cl1",
-        origin="chat",
-        request_sequence=1,
-    )
-    defaults.update(kwargs)
-    return ConversationTask(**defaults)
 
 
 def test_hydrate_first_turn_ask_only():

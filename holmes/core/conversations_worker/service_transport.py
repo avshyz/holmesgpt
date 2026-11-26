@@ -1,14 +1,14 @@
 """HTTP client for the platform-conversations agent endpoints.
 
 The contract is relay/docs/design/2026-11-24_chat-service-poc.md, sections 6
-and 7. Holmes only ever connects outbound: the session relies on
-REQUESTS_CA_BUNDLE and the proxy environment, as the other relay calls in
-Holmes do, and authenticates with the HOLMES session token the DAL already
-mints for Robusta AI.
+and 7. Holmes only ever connects outbound: the session trusts the CA bundle
+and the proxy environment the way the DAL does, and authenticates with the
+HOLMES session token the DAL already mints for Robusta AI.
 """
 
 import logging
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+import os
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import requests
 from tenacity import (
@@ -35,9 +35,6 @@ READ_TIMEOUT_SECONDS = 30
 # the long-poll and the client never gives up on a healthy call.
 CLAIM_READ_TIMEOUT_MARGIN_SECONDS = 15
 
-# Same budget as the DAL's conversation RPCs.
-_RETRY_ATTEMPTS = 3
-
 
 class ConversationServiceTransport:
     """The four agent calls of the contract, each raising
@@ -49,6 +46,9 @@ class ConversationServiceTransport:
         self._dal = dal
         self._agent_url = base_url.rstrip("/") + "/agent"
         self._session = requests.Session()
+        # requests reads REQUESTS_CA_BUNDLE on its own but not SSL_CERT_FILE,
+        # which the DAL and the Realtime socket honour.
+        self._session.verify = os.environ.get("SSL_CERT_FILE") or True
 
     # ---- the contract ----
 
@@ -64,7 +64,7 @@ class ConversationServiceTransport:
             },
             read_timeout=CLAIM_WAIT_SECONDS + CLAIM_READ_TIMEOUT_MARGIN_SECONDS,
         )
-        return list(body.get("conversations") or [])
+        return body.get("conversations") or []
 
     def get_conversation_events(
         self,
@@ -80,7 +80,7 @@ class ConversationServiceTransport:
                 "min_seq": min_seq,
             },
         )
-        return list(body.get("events") or [])
+        return body.get("events") or []
 
     def post_conversation_events(
         self,
@@ -100,10 +100,7 @@ class ConversationServiceTransport:
                 "compact": compact,
             },
         )
-        seq = body.get("seq")
-        if seq is None:
-            raise ValueError(f"post events answer carries no seq: {body!r}")
-        return int(seq)
+        return int(body["seq"])
 
     def update_conversation_status(
         self,
@@ -125,9 +122,12 @@ class ConversationServiceTransport:
 
     # ---- transport ----
 
+    # At-least-once, as on the Supabase path: an answer lost after the service
+    # committed re-sends the claim or the batch, and a duplicate is accepted
+    # over a dropped turn.
     @retry(
         retry=retry_if_exception(is_retryable_relay_error),
-        stop=stop_after_attempt(_RETRY_ATTEMPTS),
+        stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=0.5, min=0.5, max=2.0),
         before_sleep=before_sleep_log(logging.getLogger(__name__), logging.WARNING),
         reraise=True,
@@ -159,17 +159,19 @@ class ConversationServiceTransport:
             # The token was revoked or the AuthTokens row is gone: the cache
             # would otherwise serve it for up to 23 h. Not a retry (the
             # contract keeps 4xx final); the next call mints a fresh token.
-            self._forget_credentials()
+            with self._dal.lock:
+                self._dal.token_cache.pop("session_token", None)
         if response.status_code >= 400:
             raise requests.HTTPError(
-                f"{response.status_code} {response.reason}: {(response.text or '')[:500]}",
+                f"{response.status_code} {response.reason}: {response.text[:500]}",
                 response=response,
             )
-        return _json_body(response)
-
-    def _forget_credentials(self) -> None:
-        with self._dal.lock:
-            self._dal.token_cache.pop("session_token", None)
+        # A proxy answering 2xx with HTML, an empty body or JSON null must not
+        # pass as an empty answer: the claim loop backs off only on an error.
+        body = response.json()
+        if not isinstance(body, dict):
+            raise ValueError(f"unexpected answer body: {body!r}")
+        return body
 
 
 def _json_body(response: requests.Response) -> Dict[str, Any]:

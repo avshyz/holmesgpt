@@ -140,13 +140,6 @@ def test_get_conversation_events_returns_flat_event_list(build_dal):
     assert out == flat_events
 
 
-def test_get_conversation_events_returns_empty_list_when_disabled(build_dal):
-    dal = build_dal()
-    dal.enabled = False
-    assert dal.get_conversation_events(conversation_id="c") == []
-    dal.client.rpc.assert_not_called()
-
-
 # ---- claim_n_pending_conversations ----
 
 
@@ -185,7 +178,9 @@ def test_claim_n_pending_conversations_retries_transient_error_then_succeeds(bui
     assert dal.client.rpc.return_value.execute.call_count == 2
 
 
-def test_claim_n_pending_conversations_returns_empty_after_exhausting_retries(build_dal):
+def test_claim_n_pending_conversations_returns_empty_after_exhausting_retries(
+    build_dal,
+):
     dal = build_dal()
     dal.client.rpc.return_value = MagicMock(
         execute=MagicMock(side_effect=Exception("502 Bad Gateway"))

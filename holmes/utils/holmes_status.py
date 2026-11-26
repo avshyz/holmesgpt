@@ -107,19 +107,15 @@ def update_holmes_status_in_db(
             "or verify that a cluster name is provided in the Robusta configuration file."
         )
 
-    # The service replaces Realtime, so there is nothing to verify first:
-    # supports_realtime_conversations keeps the FE on the Conversations flow,
-    # and conversation_transport sends it to the service, where no wake
-    # broadcast exists.
     on_service = CONVERSATION_TRANSPORT is ConversationTransport.SERVICE
-    if realtime_available or on_service:
-        supports_realtime = bool(ENABLE_CONVERSATION_WORKER)
-        requires_broadcast = not on_service and bool(
-            CONVERSATION_WORKER_USE_REALTIME_BROADCAST
-        )
-    else:
-        supports_realtime = False
-        requires_broadcast = False
+    supports_realtime = (realtime_available or on_service) and bool(
+        ENABLE_CONVERSATION_WORKER
+    )
+    requires_broadcast = (
+        realtime_available
+        and not on_service
+        and bool(CONVERSATION_WORKER_USE_REALTIME_BROADCAST)
+    )
 
     metadata = HolmesMetadata(
         is_robusta_ai_enabled=config.should_try_robusta_ai,

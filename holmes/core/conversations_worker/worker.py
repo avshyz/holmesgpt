@@ -536,6 +536,9 @@ class ConversationWorker:
                 self._notify_event.wait(timeout=SERVICE_CLAIM_SATURATED_WAIT_SECONDS)
                 self._notify_event.clear()
                 continue
+            # Hand-rolled, not tenacity: the wait must wake on stop() and
+            # _notify_event and exit at once; tenacity re-attempts after its
+            # sleep.
             try:
                 self._try_claim_and_dispatch()
             except Exception:

@@ -6,16 +6,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from holmes.core.conversations_worker.models import (
-    ConversationReassignedError,
-    ConversationTask,
-)
+from holmes.core.conversations_worker.models import ConversationReassignedError
 from holmes.core.conversations_worker.worker import (
     SHUTDOWN_ERROR_CODE,
     SHUTDOWN_REASON,
     ConversationWorker,
 )
-from tests.core.conversations_worker.conftest import _active
+from tests.core.conversations_worker.conftest import _active, _row, _task
 
 
 def test_build_task_from_conversation_row_parses_required_fields(bare_worker):
@@ -73,24 +70,7 @@ def test_try_claim_and_dispatch_claims_only_free_slots(monkeypatch, bare_worker)
         "holmes.core.conversations_worker.worker.CONVERSATION_WORKER_MAX_CONCURRENT",
         capacity,
     )
-    w.dal.claim_n_pending_conversations.return_value = [
-        {
-            "conversation_id": "c1",
-            "account_id": "a1",
-            "cluster_id": "cl1",
-            "origin": "chat",
-            "request_sequence": 1,
-            "metadata": {},
-        },
-        {
-            "conversation_id": "c2",
-            "account_id": "a1",
-            "cluster_id": "cl1",
-            "origin": "chat",
-            "request_sequence": 1,
-            "metadata": {},
-        },
-    ]
+    w.dal.claim_n_pending_conversations.return_value = [_row("c1"), _row("c2")]
     w._try_claim_and_dispatch()
     # With no active work, the worker asks for the full configured capacity.
     w.dal.claim_n_pending_conversations.assert_called_once_with("h-test", capacity)
@@ -102,7 +82,9 @@ def test_try_claim_and_dispatch_claims_only_free_slots(monkeypatch, bare_worker)
     w.dal.update_conversation_status.assert_not_called()
 
 
-def test_try_claim_and_dispatch_passes_remaining_capacity_as_limit(monkeypatch, bare_worker):
+def test_try_claim_and_dispatch_passes_remaining_capacity_as_limit(
+    monkeypatch, bare_worker
+):
     """The claim limit reflects the slots NOT already taken by running work."""
     w = bare_worker()
     monkeypatch.setattr(
@@ -268,17 +250,7 @@ def test_backlog_drains_with_exact_claim_calls_and_limits(monkeypatch, bare_work
     def fake_claim(_holmes_id, limit):
         assert limit > 0  # the worker must never call claim with no free capacity
         batch, pending[:] = pending[:limit], pending[limit:]
-        return [
-            {
-                "conversation_id": cid,
-                "account_id": "a",
-                "cluster_id": "cl",
-                "origin": "chat",
-                "request_sequence": 1,
-                "metadata": {},
-            }
-            for cid in batch
-        ]
+        return [_row(cid) for cid in batch]
 
     w.dal.claim_n_pending_conversations.side_effect = fake_claim
 
@@ -345,17 +317,7 @@ def test_two_workers_claim_disjoint_sets(monkeypatch, bare_worker):
         # SKIP LOCKED: each caller atomically takes a disjoint slice.
         with db_lock:
             batch, pending[:] = pending[:limit], pending[limit:]
-        return [
-            {
-                "conversation_id": cid,
-                "account_id": "a",
-                "cluster_id": "cl",
-                "origin": "chat",
-                "request_sequence": 1,
-                "metadata": {},
-            }
-            for cid in batch
-        ]
+        return [_row(cid) for cid in batch]
 
     dispatched: dict = {}  # conversation_id -> worker label (detects double dispatch)
 
@@ -420,13 +382,7 @@ def test_dispatch_submits_without_status_transition(bare_worker):
     tracks it as active. The claim RPC already set the row to 'running', so no
     update_conversation_status call happens here."""
     w = bare_worker()
-    task = ConversationTask(
-        conversation_id="c1",
-        account_id="a1",
-        cluster_id="cl1",
-        origin="chat",
-        request_sequence=1,
-    )
+    task = _task()
     w._dispatch(task)
     w.dal.update_conversation_status.assert_not_called()
     w._executor.submit.assert_called_once()
@@ -437,13 +393,7 @@ def test_dispatch_noop_when_not_running(bare_worker):
     """If the worker is stopping, _dispatch must not submit or track the task."""
     w = bare_worker()
     w._running = False
-    task = ConversationTask(
-        conversation_id="c1",
-        account_id="a1",
-        cluster_id="cl1",
-        origin="chat",
-        request_sequence=1,
-    )
+    task = _task()
     w._dispatch(task)
     w._executor.submit.assert_not_called()
     assert ("c1", 1) not in w._active_conversation_ids
@@ -454,26 +404,14 @@ def test_dispatch_drops_task_when_executor_shutdown_races(bare_worker):
     in-flight tracking must be rolled back so capacity isn't leaked."""
     w = bare_worker()
     w._executor.submit.side_effect = RuntimeError("cannot schedule new futures")
-    task = ConversationTask(
-        conversation_id="c1",
-        account_id="a1",
-        cluster_id="cl1",
-        origin="chat",
-        request_sequence=1,
-    )
+    task = _task()
     w._dispatch(task)
     assert ("c1", 1) not in w._active_conversation_ids
 
 
 def test_process_conversation_safe_marks_failed_on_exception(bare_worker):
     w = bare_worker()
-    task = ConversationTask(
-        conversation_id="c1",
-        account_id="a1",
-        cluster_id="cl1",
-        origin="chat",
-        request_sequence=1,
-    )
+    task = _task()
 
     def boom(*a, **kw):
         raise RuntimeError("synthetic failure")
@@ -504,13 +442,7 @@ def test_process_conversation_safe_marks_failed_on_exception(bare_worker):
 
 def test_process_conversation_safe_clears_active_on_success(bare_worker):
     w = bare_worker()
-    task = ConversationTask(
-        conversation_id="c1",
-        account_id="a1",
-        cluster_id="cl1",
-        origin="chat",
-        request_sequence=1,
-    )
+    task = _task()
     with patch.object(ConversationWorker, "_process_conversation", lambda self, t: None):
         w._process_conversation_safe(task)
 
@@ -523,13 +455,7 @@ def test_process_conversation_safe_wakes_claim_loop_to_reclaim(bare_worker):
     behind while at capacity."""
     w = bare_worker()
     w._notify_event.clear()
-    task = ConversationTask(
-        conversation_id="c1",
-        account_id="a1",
-        cluster_id="cl1",
-        origin="chat",
-        request_sequence=1,
-    )
+    task = _task()
     with patch.object(ConversationWorker, "_process_conversation", lambda self, t: None):
         w._process_conversation_safe(task)
 
@@ -541,13 +467,7 @@ def test_process_conversation_safe_no_status_update_on_reassignment(bare_worker)
     update_conversation_status — the conversation's state is already
     being handled by whoever reassigned it."""
     w = bare_worker()
-    task = ConversationTask(
-        conversation_id="c1",
-        account_id="a1",
-        cluster_id="cl1",
-        origin="chat",
-        request_sequence=1,
-    )
+    task = _task()
 
     def boom(*a, **kw):
         raise ConversationReassignedError("x")
@@ -589,20 +509,11 @@ def test_notify_event_wakes_claim_loop(bare_worker):
     assert call_count["n"] == 1
 
 
-def _verify_worker(bare_worker):
-    """Build a worker bare enough to drive _realtime_verify_loop directly,
-    without spinning up the executor/claim-thread machinery."""
-    w = bare_worker()
-    w._running = True
-    w.config = MagicMock()
-    return w
-
-
 def test_realtime_verify_loop_updates_status_and_starts_workers_on_true(bare_worker):
     """A definitive True must flip HolmesStatus to env-var values, kick
     off the executor / claim loop / Realtime subscription, and exit the
     verifier loop."""
-    w = _verify_worker(bare_worker)
+    w = bare_worker()
     w.dal.is_realtime_enabled.return_value = True
     w._start_active_workers = MagicMock()
 
@@ -621,7 +532,7 @@ def test_realtime_verify_loop_shuts_down_on_definitive_false(bare_worker):
     """A definitive False must call stop() WITHOUT having ever spun up
     the active workers; HolmesStatus is left at its default False so no
     extra status write is needed from this path."""
-    w = _verify_worker(bare_worker)
+    w = bare_worker()
     w.dal.is_realtime_enabled.return_value = False
     w.stop = MagicMock()  # don't actually tear down the bare worker
     w._start_active_workers = MagicMock()
@@ -639,7 +550,7 @@ def test_realtime_verify_loop_shuts_down_on_definitive_false(bare_worker):
 def test_realtime_verify_loop_retries_on_connectivity_errors(bare_worker):
     """When is_realtime_enabled returns None (connectivity error), the
     loop must wait and retry until it gets a definitive answer."""
-    w = _verify_worker(bare_worker)
+    w = bare_worker()
     # Three connectivity failures, then True.
     w.dal.is_realtime_enabled.side_effect = [None, None, None, True]
 
@@ -666,7 +577,7 @@ def test_realtime_verify_loop_retries_on_connectivity_errors(bare_worker):
 def test_realtime_verify_loop_exits_when_stop_event_set(bare_worker):
     """If stop() has already been called when the verifier starts, the
     loop must bail out before issuing any probe."""
-    w = _verify_worker(bare_worker)
+    w = bare_worker()
     w.dal.is_realtime_enabled.return_value = None  # always inconclusive
     w._realtime_verify_stop.set()
 
@@ -682,7 +593,7 @@ def test_realtime_verify_loop_exits_when_stop_event_set(bare_worker):
 def test_realtime_verify_loop_exits_when_running_flag_cleared(bare_worker):
     """If _running is cleared (worker stopped), the loop must not start a
     new probe iteration."""
-    w = _verify_worker(bare_worker)
+    w = bare_worker()
     w._running = False
     w.dal.is_realtime_enabled.return_value = None
 
@@ -701,7 +612,7 @@ def test_realtime_verify_loop_surfaces_unexpected_exceptions(bare_worker):
     must surface it rather than silently retry forever. The DAL already
     folds all transport-level errors into a None return, so anything that
     escapes here is something we can't sensibly back off from."""
-    w = _verify_worker(bare_worker)
+    w = bare_worker()
     w.dal.is_realtime_enabled.side_effect = RuntimeError("boom")
 
     w._realtime_verify_stop.wait = lambda timeout=None: False  # type: ignore[assignment]
@@ -716,7 +627,7 @@ def test_realtime_verify_loop_surfaces_unexpected_exceptions(bare_worker):
     mock_update.assert_not_called()
 
 
-def test_start_only_spawns_verifier_not_active_workers(worker_dal):
+def test_start_only_spawns_verifier_not_active_workers(worker_dal, worker):
     """start() must NOT spin up the executor, claim loop, or Realtime
     subscription before the verifier confirms realtime is enabled —
     otherwise we'd be polling/subscribing for projects that don't
@@ -730,31 +641,25 @@ def test_start_only_spawns_verifier_not_active_workers(worker_dal):
         return None
 
     worker_dal.is_realtime_enabled.side_effect = blocking_check
-    config = MagicMock()
-    chat_function = MagicMock()
-    w = ConversationWorker(dal=worker_dal, config=config, chat_function=chat_function)
 
     try:
-        w.start()
+        worker.start()
         # Verifier thread is up.
-        assert w._realtime_verify_thread is not None
-        assert w._realtime_verify_thread.is_alive()
+        assert worker._realtime_verify_thread is not None
+        assert worker._realtime_verify_thread.is_alive()
         # But active workers haven't been started.
-        assert w._executor is None
-        assert w._claim_thread is None
-        assert w._realtime_manager is None
+        assert worker._executor is None
+        assert worker._claim_thread is None
+        assert worker._realtime_manager is None
     finally:
         block_event.set()
-        w.stop()
+        worker.stop()
 
 
-def test_start_starts_active_workers_after_definitive_true(worker_dal):
+def test_start_starts_active_workers_after_definitive_true(worker_dal, worker):
     """End-to-end: once is_realtime_enabled returns True, the verifier
     must call _start_active_workers and update HolmesStatus."""
     worker_dal.is_realtime_enabled.return_value = True
-    config = MagicMock()
-    chat_function = MagicMock()
-    w = ConversationWorker(dal=worker_dal, config=config, chat_function=chat_function)
 
     with patch(
         "holmes.core.conversations_worker.worker.CONVERSATION_WORKER_REALTIME_ENABLED",
@@ -763,58 +668,52 @@ def test_start_starts_active_workers_after_definitive_true(worker_dal):
         "holmes.core.conversations_worker.worker.update_holmes_status_in_db"
     ) as mock_update:
         try:
-            w.start()
-            assert w._realtime_verify_thread is not None
-            w._realtime_verify_thread.join(timeout=3)
-            assert not w._realtime_verify_thread.is_alive()
+            worker.start()
+            assert worker._realtime_verify_thread is not None
+            worker._realtime_verify_thread.join(timeout=3)
+            assert not worker._realtime_verify_thread.is_alive()
             mock_update.assert_called_once_with(
-                worker_dal, config, realtime_available=True
+                worker_dal, worker.config, realtime_available=True
             )
             # Active workers should be up now.
-            assert w._executor is not None
-            assert w._claim_thread is not None
+            assert worker._executor is not None
+            assert worker._claim_thread is not None
         finally:
-            w.stop()
+            worker.stop()
 
 
-def test_start_does_not_start_active_workers_after_definitive_false(worker_dal):
+def test_start_does_not_start_active_workers_after_definitive_false(worker_dal, worker):
     """When is_realtime_enabled returns False, the active workers must
     never spin up — start() never produced an executor or claim loop."""
     worker_dal.is_realtime_enabled.return_value = False
-    config = MagicMock()
-    chat_function = MagicMock()
-    w = ConversationWorker(dal=worker_dal, config=config, chat_function=chat_function)
 
     with patch(
         "holmes.core.conversations_worker.worker.update_holmes_status_in_db"
     ) as mock_update:
-        w.start()
-        assert w._realtime_verify_thread is not None
-        w._realtime_verify_thread.join(timeout=3)
-        assert not w._realtime_verify_thread.is_alive()
+        worker.start()
+        assert worker._realtime_verify_thread is not None
+        worker._realtime_verify_thread.join(timeout=3)
+        assert not worker._realtime_verify_thread.is_alive()
 
     # No HolmesStatus update from this path — the default-False row from
     # server startup already reflects reality.
     mock_update.assert_not_called()
     # And no polling/subscription components were ever created.
-    assert w._executor is None
-    assert w._claim_thread is None
-    assert w._realtime_manager is None
-    assert w._running is False  # stop() was triggered by the verifier
+    assert worker._executor is None
+    assert worker._claim_thread is None
+    assert worker._realtime_manager is None
+    assert worker._running is False  # stop() was triggered by the verifier
 
 
-def test_start_skips_when_dal_disabled(worker_dal):
+def test_start_skips_when_dal_disabled(worker_dal, worker):
     """If the DAL itself isn't enabled, start() returns early without
     spawning any threads."""
     worker_dal.enabled = False
-    config = MagicMock()
-    chat_function = MagicMock()
-    w = ConversationWorker(dal=worker_dal, config=config, chat_function=chat_function)
 
-    w.start()
+    worker.start()
 
-    assert w._running is False
-    assert w._realtime_verify_thread is None
+    assert worker._running is False
+    assert worker._realtime_verify_thread is None
     worker_dal.is_realtime_enabled.assert_not_called()
 
 
@@ -839,11 +738,13 @@ def test_claim_loop_initial_claim_without_realtime(bare_worker):
     assert call_count["n"] == 1
 
 
-def test_realtime_verify_loop_warns_on_transient_connectivity_exception(caplog, bare_worker):
+def test_realtime_verify_loop_warns_on_transient_connectivity_exception(
+    caplog, bare_worker
+):
     """A transient connectivity exception (e.g. ConnectionError) must be
     treated as a None/retry and logged at WARNING, not ERROR."""
     import logging
-    w = _verify_worker(bare_worker)
+    w = bare_worker()
     # First call raises a transient error; second call returns True so the
     # loop terminates.
     w.dal.is_realtime_enabled.side_effect = [ConnectionError("dns blip"), True]
@@ -872,7 +773,7 @@ def test_realtime_verify_loop_surfaces_non_transient_exception(caplog, bare_work
     logged at ERROR and propagate out of the loop instead of being silently
     retried."""
     import logging
-    w = _verify_worker(bare_worker)
+    w = bare_worker()
     w.dal.is_realtime_enabled.side_effect = AttributeError("dal misconfigured")
 
     with pytest.raises(AttributeError):

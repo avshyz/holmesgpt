@@ -16,21 +16,17 @@ These tests assert the integration without re-testing the recorder itself
    (``conversation_source='conversations'``, ``request_type='user_chat'``,
    etc.) so dashboards can attribute these rows correctly.
 """
-import threading
 from unittest.mock import MagicMock, patch
 
 from holmes.core.conversations_worker.models import ConversationTask
 from holmes.core.conversations_worker.worker import ConversationWorker
 from holmes.core.models import ChatRequest
+from tests.core.conversations_worker.conftest import _task
 
 
-def _bare_worker():
-    w = ConversationWorker.__new__(ConversationWorker)
-    w.dal = MagicMock()
-    w.dal.enabled = True
-    w.dal.update_conversation_status = MagicMock(return_value=True)
+def _bare_worker(bare_worker):
+    w = bare_worker()
     w.dal.get_global_instructions_for_account = MagicMock(return_value=None)
-    w.config = MagicMock()
     # create_toolcalling_llm returns the AI; we configure its llm attrs so
     # build_chat_recorder_state can read model / is_robusta_model.
     ai = MagicMock()
@@ -39,30 +35,7 @@ def _bare_worker():
     ai.llm.is_robusta_model = False
     w.config.create_toolcalling_llm = MagicMock(return_value=ai)
     w.config.get_skill_catalog = MagicMock(return_value=[])
-    w.chat_function = MagicMock()
-    w.holmes_id = "h-test"
-    w._running = True
-    w._claim_thread = None
-    w._notify_event = threading.Event()
-    w._saturated_since = None
-    w._saturation_logged = False
-    w._last_stuck_warn = None
-    w._executor = MagicMock()
-    w._active_conversation_ids = {}
-    w._active_lock = threading.Lock()
-    w._dispatch_lock = threading.Lock()
-    w._realtime_manager = None
     return w, ai
-
-
-def _task():
-    return ConversationTask(
-        conversation_id="c1",
-        account_id="a1",
-        cluster_id="cl1",
-        origin="chat",
-        request_sequence=1,
-    )
 
 
 def _chat_request():
@@ -139,10 +112,10 @@ def _run(worker, ai):
     return captured
 
 
-def test_stream_is_wrapped_with_usage_recorder():
+def test_stream_is_wrapped_with_usage_recorder(bare_worker):
     """The recorder wrapper must see the raw stream so it can observe
     TOOL_RESULT / ANSWER_END events as they flow past."""
-    worker, ai = _bare_worker()
+    worker, ai = _bare_worker(bare_worker)
     captured = _run(worker, ai)
 
     wrap_call = captured["wrap_call"]
@@ -156,11 +129,11 @@ def test_stream_is_wrapped_with_usage_recorder():
     assert wrap_call.args[1] is captured["recorder_state"]
 
 
-def test_publisher_consumes_wrapped_stream_not_raw():
+def test_publisher_consumes_wrapped_stream_not_raw(bare_worker):
     """If the publisher consumed the raw stream directly, the recorder's
     finally-block would never see the terminal event and would mark the row
     'aborted'. The wrapped stream must be the one passed to the publisher."""
-    worker, ai = _bare_worker()
+    worker, ai = _bare_worker(bare_worker)
     captured = _run(worker, ai)
 
     consume_args, _ = captured["publisher"].consume.call_args
@@ -170,12 +143,12 @@ def test_publisher_consumes_wrapped_stream_not_raw():
     )
 
 
-def test_recorder_state_uses_workers_dal_and_streaming_flag():
+def test_recorder_state_uses_workers_dal_and_streaming_flag(bare_worker):
     """build_chat_recorder_state must be called with the worker's dal and
     is_streaming=True (worker is always streaming). Without this, telemetry
     would either fall on the floor (no dal) or be misclassified as
     non-streaming."""
-    worker, ai = _bare_worker()
+    worker, ai = _bare_worker(bare_worker)
     captured = _run(worker, ai)
 
     build_call = captured["build_state_call"]
@@ -198,11 +171,11 @@ def test_recorder_state_uses_workers_dal_and_streaming_flag():
 # NULL-row bug the user reported.
 # --------------------------------------------------------------------------
 
-def _capture_chat_request_from_process(task, user_message_data):
+def _capture_chat_request_from_process(bare_worker, task, user_message_data):
     """Drive _process_conversation just far enough to capture the
     ChatRequest it constructs. Patches _run_chat_and_publish so the
     LLM pipeline never runs."""
-    worker, _ = _bare_worker()
+    worker, _ = _bare_worker(bare_worker)
     worker.dal.get_conversation_events = MagicMock(
         return_value=[{"event": "user_message", "data": user_message_data, "ts": "1"}]
     )
@@ -218,7 +191,7 @@ def _capture_chat_request_from_process(task, user_message_data):
     return captured.get("chat_request")
 
 
-def test_user_id_falls_back_to_conversations_row_when_event_omits_it():
+def test_user_id_falls_back_to_conversations_row_when_event_omits_it(bare_worker):
     # FE wrote user_id onto the Conversations row but didn't repeat it in
     # the per-turn user_message data — exactly the symptom the user
     # reported (HolmesUsageEvents.user_id NULL despite the value being
@@ -231,12 +204,12 @@ def test_user_id_falls_back_to_conversations_row_when_event_omits_it():
         request_sequence=1,
         user_id="u-conversations-row",
     )
-    cr = _capture_chat_request_from_process(task, {"ask": "follow-up?"})
+    cr = _capture_chat_request_from_process(bare_worker, task, {"ask": "follow-up?"})
     assert cr is not None
     assert cr.user_id == "u-conversations-row"
 
 
-def test_event_user_id_wins_over_conversations_row():
+def test_event_user_id_wins_over_conversations_row(bare_worker):
     # If the FE DOES repeat user_id in the event data, that value wins —
     # so a future flow that lets users hand-off a chat could still record
     # the per-turn rater. The Conversations-row value is a fallback, not
@@ -250,13 +223,13 @@ def test_event_user_id_wins_over_conversations_row():
         user_id="u-conversations-row",
     )
     cr = _capture_chat_request_from_process(
-        task, {"ask": "q", "user_id": "u-from-event"}
+        bare_worker, task, {"ask": "q", "user_id": "u-from-event"}
     )
     assert cr is not None
     assert cr.user_id == "u-from-event"
 
 
-def test_request_source_falls_back_to_conversations_metadata():
+def test_request_source_falls_back_to_conversations_metadata(bare_worker):
     # FE puts request_source under Conversations.metadata when it creates
     # the row. Per-turn events typically don't repeat it. Worker should
     # pull from metadata so dashboards can slice by request_source even
@@ -269,12 +242,12 @@ def test_request_source_falls_back_to_conversations_metadata():
         request_sequence=1,
         metadata={"request_source": "alert_investigation", "other": "x"},
     )
-    cr = _capture_chat_request_from_process(task, {"ask": "follow-up?"})
+    cr = _capture_chat_request_from_process(bare_worker, task, {"ask": "follow-up?"})
     assert cr is not None
     assert cr.request_source == "alert_investigation"
 
 
-def test_event_request_source_wins_over_conversations_metadata():
+def test_event_request_source_wins_over_conversations_metadata(bare_worker):
     # Same caller-wins semantic as user_id. The conversation may have been
     # created from one surface ('alert_investigation') but a follow-up
     # turn could legitimately re-classify itself ('freeform').
@@ -287,13 +260,13 @@ def test_event_request_source_wins_over_conversations_metadata():
         metadata={"request_source": "alert_investigation"},
     )
     cr = _capture_chat_request_from_process(
-        task, {"ask": "q", "request_source": "freeform"}
+        bare_worker, task, {"ask": "q", "request_source": "freeform"}
     )
     assert cr is not None
     assert cr.request_source == "freeform"
 
 
-def test_no_fallback_values_anywhere_yields_null():
+def test_no_fallback_values_anywhere_yields_null(bare_worker):
     # Defense: if neither the row nor the event carries either field, the
     # ChatRequest must still build (just with NULLs that the recorder
     # writes through to the row).
@@ -304,7 +277,7 @@ def test_no_fallback_values_anywhere_yields_null():
         origin="chat",
         request_sequence=1,
     )
-    cr = _capture_chat_request_from_process(task, {"ask": "q"})
+    cr = _capture_chat_request_from_process(bare_worker, task, {"ask": "q"})
     assert cr is not None
     assert cr.user_id is None
     assert cr.request_source is None
@@ -322,7 +295,7 @@ def test_no_fallback_values_anywhere_yields_null():
 # --------------------------------------------------------------------------
 
 
-def test_request_type_passes_through_from_event_data():
+def test_request_type_passes_through_from_event_data(bare_worker):
     # FE-supplied request_type wins. Today only /api/chat sees this, but
     # the runner could write request_type into the user_message blob at
     # any time without code changes here.
@@ -334,13 +307,13 @@ def test_request_type_passes_through_from_event_data():
         request_sequence=1,
     )
     cr = _capture_chat_request_from_process(
-        task, {"ask": "q", "request_type": "scheduled_prompt"}
+        bare_worker, task, {"ask": "q", "request_type": "scheduled_prompt"}
     )
     assert cr is not None
     assert cr.request_type == "scheduled_prompt"
 
 
-def test_request_type_unset_when_event_omits_it():
+def test_request_type_unset_when_event_omits_it(bare_worker):
     # Critical: when the event doesn't supply request_type, the worker
     # MUST leave it None on the ChatRequest so build_chat_recorder_state's
     # auto-detection (Slack prefix, fallback default) gets to run. If the
@@ -352,7 +325,7 @@ def test_request_type_unset_when_event_omits_it():
         origin="chat",
         request_sequence=1,
     )
-    cr = _capture_chat_request_from_process(task, {"ask": "q"})
+    cr = _capture_chat_request_from_process(bare_worker, task, {"ask": "q"})
     assert cr is not None
     assert cr.request_type is None, (
         "Worker must leave request_type=None so build_chat_recorder_state "
@@ -361,7 +334,7 @@ def test_request_type_unset_when_event_omits_it():
     )
 
 
-def test_slack_prefix_in_event_ask_routes_to_slack_chat_via_helper():
+def test_slack_prefix_in_event_ask_routes_to_slack_chat_via_helper(bare_worker):
     # End-to-end check: an ask carrying the runner's Slack prefix must
     # arrive at build_chat_recorder_state with request_type=None so the
     # helper tags it as 'slack_chat'. We don't call the helper here —
@@ -378,7 +351,7 @@ def test_slack_prefix_in_event_ask_routes_to_slack_chat_via_helper():
         "**@user_U0AKMP2CZ97** • 2026-05-04T05:10:04Z\n\n"
         "high cpu in pod alert"
     )
-    cr = _capture_chat_request_from_process(task, {"ask": slack_ask})
+    cr = _capture_chat_request_from_process(bare_worker, task, {"ask": slack_ask})
     assert cr is not None
     # ChatRequest.ask carries the original prefix (helper inspects this).
     assert cr.ask.startswith("**@user_U0AKMP2CZ97**")

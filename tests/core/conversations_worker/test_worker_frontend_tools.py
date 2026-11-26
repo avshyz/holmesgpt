@@ -1,9 +1,6 @@
 """Tests for ConversationWorker frontend-tool injection."""
-import threading
 from unittest.mock import MagicMock
 
-from holmes.core.conversations_worker.models import ConversationTask
-from holmes.core.conversations_worker.worker import ConversationWorker
 from holmes.core.models import (
     ChatRequest,
     FrontendToolDefinition,
@@ -13,38 +10,7 @@ from holmes.core.tools_utils.frontend_tools import (
     FrontendNoopTool,
     FrontendPauseTool,
 )
-
-
-def _bare_worker():
-    w = ConversationWorker.__new__(ConversationWorker)
-    w.dal = MagicMock()
-    w.dal.enabled = True
-    w.dal.update_conversation_status = MagicMock(return_value=True)
-    w.config = MagicMock()
-    w.chat_function = MagicMock()
-    w.holmes_id = "h-test"
-    w._running = True
-    w._claim_thread = None
-    w._notify_event = threading.Event()
-    w._saturated_since = None
-    w._saturation_logged = False
-    w._last_stuck_warn = None
-    w._executor = MagicMock()
-    w._active_conversation_ids = {}
-    w._active_lock = threading.Lock()
-    w._dispatch_lock = threading.Lock()
-    w._realtime_manager = None
-    return w
-
-
-def _task():
-    return ConversationTask(
-        conversation_id="c1",
-        account_id="a1",
-        cluster_id="cl1",
-        origin="chat",
-        request_sequence=1,
-    )
+from tests.core.conversations_worker.conftest import _task
 
 
 def _ai_with_backend_tools(*backend_tool_names):
@@ -59,8 +25,8 @@ def _ai_with_backend_tools(*backend_tool_names):
     return ai, cloned_ai, cloned_executor
 
 
-def test_no_frontend_tools_returns_ai_unchanged():
-    worker = _bare_worker()
+def test_no_frontend_tools_returns_ai_unchanged(bare_worker):
+    worker = bare_worker()
     ai, _, _ = _ai_with_backend_tools("kubectl_get")
     chat_request = ChatRequest(ask="hi", frontend_tools=None)
 
@@ -71,8 +37,8 @@ def test_no_frontend_tools_returns_ai_unchanged():
     ai.with_executor.assert_not_called()
 
 
-def test_pause_mode_frontend_tool_is_built_and_executor_cloned():
-    worker = _bare_worker()
+def test_pause_mode_frontend_tool_is_built_and_executor_cloned(bare_worker):
+    worker = bare_worker()
     ai, cloned_ai, cloned_executor = _ai_with_backend_tools("kubectl_get")
     chat_request = ChatRequest(
         ask="hi",
@@ -97,8 +63,8 @@ def test_pause_mode_frontend_tool_is_built_and_executor_cloned():
     ai.with_executor.assert_called_once_with(cloned_executor)
 
 
-def test_noop_mode_frontend_tool_is_built_with_canned_response():
-    worker = _bare_worker()
+def test_noop_mode_frontend_tool_is_built_with_canned_response(bare_worker):
+    worker = bare_worker()
     ai, cloned_ai, _ = _ai_with_backend_tools("kubectl_get")
     chat_request = ChatRequest(
         ask="hi",
@@ -122,8 +88,8 @@ def test_noop_mode_frontend_tool_is_built_with_canned_response():
     assert extras[0].canned_response == "ack"
 
 
-def test_collision_with_backend_tool_fails_conversation():
-    worker = _bare_worker()
+def test_collision_with_backend_tool_fails_conversation(bare_worker):
+    worker = bare_worker()
     ai, _, _ = _ai_with_backend_tools("kubectl_get")
     chat_request = ChatRequest(
         ask="hi",
@@ -154,8 +120,8 @@ def test_collision_with_backend_tool_fails_conversation():
     assert failed_calls
 
 
-def test_duplicate_frontend_tool_names_fail_conversation():
-    worker = _bare_worker()
+def test_duplicate_frontend_tool_names_fail_conversation(bare_worker):
+    worker = bare_worker()
     ai, _, _ = _ai_with_backend_tools("kubectl_get")
     chat_request = ChatRequest(
         ask="hi",
@@ -186,8 +152,8 @@ def test_duplicate_frontend_tool_names_fail_conversation():
     assert "create_dashboard" in err["data"]["description"]
 
 
-def test_mixed_pause_and_noop_tools_are_both_built():
-    worker = _bare_worker()
+def test_mixed_pause_and_noop_tools_are_both_built(bare_worker):
+    worker = bare_worker()
     ai, _, _ = _ai_with_backend_tools("kubectl_get")
     chat_request = ChatRequest(
         ask="hi",

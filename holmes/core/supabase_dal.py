@@ -1362,13 +1362,10 @@ class SupabaseDal:
         if limit <= 0:
             return []
 
-        service = self._service_transport
-        if service is not None:
-            # The service holds the call open until rows exist or its wait
-            # ends. A failure propagates after the transport's retries: the
-            # service claim loop backs off on it, which it cannot do on an
-            # empty answer.
-            return service.claim(self.cluster, holmes_id, limit)
+        if self._service_transport:
+            # A failure propagates after the transport's retries: the service
+            # claim loop backs off on it, which it cannot do on an empty answer.
+            return self._service_transport.claim(self.cluster, holmes_id, limit)
 
         # Retry transient infra errors (DNS/5xx) so a hiccup doesn't skip a poll.
         @retry(
@@ -1569,15 +1566,10 @@ class SupabaseDal:
                     raise ConversationReassignedError(str(e)) from e
                 raise
 
-        service = self._service_transport
         try:
-            if service is not None:
-                return service.post_conversation_events(
-                    conversation_id=conversation_id,
-                    assignee=assignee,
-                    request_sequence=request_sequence,
-                    events=events,
-                    compact=compact,
+            if self._service_transport:
+                return self._service_transport.post_conversation_events(
+                    conversation_id, assignee, request_sequence, events, compact
                 )
             return _post_with_retry()
         except ConversationReassignedError:
@@ -1647,14 +1639,10 @@ class SupabaseDal:
                     raise ConversationReassignedError(str(e)) from e
                 raise
 
-        service = self._service_transport
         try:
-            if service is not None:
-                return service.update_conversation_status(
-                    conversation_id=conversation_id,
-                    request_sequence=request_sequence,
-                    assignee=assignee,
-                    status=status,
+            if self._service_transport:
+                return self._service_transport.update_conversation_status(
+                    conversation_id, request_sequence, assignee, status
                 )
             return _update_with_retry()
         except ConversationReassignedError:
@@ -1711,13 +1699,10 @@ class SupabaseDal:
             ).execute()
             return res.data or []
 
-        service = self._service_transport
         try:
-            if service is not None:
-                return service.get_conversation_events(
-                    conversation_id,
-                    include_compacted=include_compacted,
-                    min_seq=min_seq,
+            if self._service_transport:
+                return self._service_transport.get_conversation_events(
+                    conversation_id, include_compacted, min_seq
                 )
             return _fetch_with_retry()
         except Exception:

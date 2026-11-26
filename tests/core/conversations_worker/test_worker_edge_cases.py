@@ -12,43 +12,10 @@ Covered scenarios:
      but no new user_message for this turn — the prior user_message is
      "already answered" and must not be re-processed.
 """
-import threading
 from unittest.mock import MagicMock, patch
 
-from holmes.core.conversations_worker.models import ConversationTask
 from holmes.core.conversations_worker.worker import ConversationWorker
-
-
-def _bare_worker():
-    w = ConversationWorker.__new__(ConversationWorker)
-    w.dal = MagicMock()
-    w.dal.enabled = True
-    w.dal.update_conversation_status = MagicMock(return_value=True)
-    w.config = MagicMock()
-    w.chat_function = MagicMock()
-    w.holmes_id = "h-test"
-    w._running = True
-    w._claim_thread = None
-    w._notify_event = threading.Event()
-    w._saturated_since = None
-    w._saturation_logged = False
-    w._last_stuck_warn = None
-    w._executor = MagicMock()
-    w._active_conversation_ids = {}
-    w._active_lock = threading.Lock()
-    w._dispatch_lock = threading.Lock()
-    w._realtime_manager = None
-    return w
-
-
-def _task():
-    return ConversationTask(
-        conversation_id="c1",
-        account_id="a1",
-        cluster_id="cl1",
-        origin="chat",
-        request_sequence=1,
-    )
+from tests.core.conversations_worker.conftest import _task
 
 
 def _assert_failed_with_no_question(worker, task):
@@ -84,16 +51,16 @@ def _run_process(worker, task, events):
     return run_chat
 
 
-def test_no_events_fails_cleanly():
-    worker = _bare_worker()
+def test_no_events_fails_cleanly(bare_worker):
+    worker = bare_worker()
     task = _task()
     run_chat = _run_process(worker, task, [])
     _assert_failed_with_no_question(worker, task)
     run_chat.assert_not_called()
 
 
-def test_empty_ask_fails_cleanly():
-    worker = _bare_worker()
+def test_empty_ask_fails_cleanly(bare_worker):
+    worker = bare_worker()
     task = _task()
     events = [
         {"event": "user_message", "data": {"ask": ""}, "ts": "1"},
@@ -103,10 +70,10 @@ def test_empty_ask_fails_cleanly():
     run_chat.assert_not_called()
 
 
-def test_user_message_without_ask_or_decisions_fails():
+def test_user_message_without_ask_or_decisions_fails(bare_worker):
     """user_message with no ask, no tool_decisions, no frontend_tool_results —
     there's no actionable input. Must fail cleanly."""
-    worker = _bare_worker()
+    worker = bare_worker()
     task = _task()
     events = [
         {"event": "user_message", "data": {"model": "whatever"}, "ts": "1"},
@@ -116,11 +83,11 @@ def test_user_message_without_ask_or_decisions_fails():
     run_chat.assert_not_called()
 
 
-def test_already_answered_user_message_fails():
+def test_already_answered_user_message_fails(bare_worker):
     """A terminal event AFTER the latest user_message means that user_message
     was already processed. The worker must NOT re-run the stale question —
     it must fail cleanly so the missing new user_message is surfaced."""
-    worker = _bare_worker()
+    worker = bare_worker()
     task = _task()
     events = [
         {"event": "user_message", "data": {"ask": "original"}, "ts": "1"},
@@ -135,10 +102,10 @@ def test_already_answered_user_message_fails():
     run_chat.assert_not_called()
 
 
-def test_already_approved_user_message_fails():
+def test_already_approved_user_message_fails(bare_worker):
     """Same scenario with approval_required instead of ai_answer_end — the
     previous turn is waiting for user input, but no new user_message arrived."""
-    worker = _bare_worker()
+    worker = bare_worker()
     task = _task()
     events = [
         {"event": "user_message", "data": {"ask": "original"}, "ts": "1"},
@@ -156,10 +123,10 @@ def test_already_approved_user_message_fails():
     run_chat.assert_not_called()
 
 
-def test_followup_with_tool_decisions_is_processed():
+def test_followup_with_tool_decisions_is_processed(bare_worker):
     """Positive control: valid resume-only flow (new user_message with
     tool_decisions, after an approval_required) must be processed, not failed."""
-    worker = _bare_worker()
+    worker = bare_worker()
     task = _task()
     prev_messages = [
         {"role": "system", "content": "s"},
