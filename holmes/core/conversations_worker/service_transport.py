@@ -47,7 +47,7 @@ class ConversationServiceTransport:
         self._agent_url = base_url.rstrip("/") + "/agent"
         self._session = requests.Session()
         # requests reads REQUESTS_CA_BUNDLE on its own but not SSL_CERT_FILE,
-        # which the DAL and the Realtime socket honour.
+        # which the DAL and the Realtime socket honour ahead of it.
         self._session.verify = os.environ.get("SSL_CERT_FILE") or True
 
     # ---- the contract ----
@@ -148,6 +148,9 @@ class ConversationServiceTransport:
             params=params,
             headers={"Authorization": f"Bearer {account_id} {token}"},
             timeout=(CONNECT_TIMEOUT_SECONDS, read_timeout),
+            # Passed per call: requests lets REQUESTS_CA_BUNDLE override the
+            # session's bundle when the call names none.
+            verify=self._session.verify,
         )
         if response.status_code == 409:
             body = _json_body(response)

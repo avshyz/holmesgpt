@@ -42,15 +42,18 @@ def transport():
     return ConversationServiceTransport(dal, base_url=BASE + "/")
 
 
-def test_session_verify_follows_the_dal_ca_lookup(monkeypatch, tmp_path):
+def test_requests_verify_against_the_dal_ca_lookup(responses, monkeypatch, tmp_path):
     bundle = tmp_path / "ca.pem"
     bundle.write_text("")
     monkeypatch.setenv("SSL_CERT_FILE", str(bundle))
     monkeypatch.setenv("REQUESTS_CA_BUNDLE", "/elsewhere.pem")
+    responses.post(f"{AGENT}/claim", json={"conversations": []})
+    dal = MagicMock()
+    dal.get_ai_credentials.return_value = ("acc-1", "tok-1")
 
-    transport = ConversationServiceTransport(MagicMock(), base_url=BASE)
+    ConversationServiceTransport(dal, base_url=BASE).claim("c", "h", 1)
 
-    assert transport._session.verify == str(bundle)
+    assert responses.calls[0].request.req_kwargs["verify"] == str(bundle)
 
 
 # ---- claim ----
